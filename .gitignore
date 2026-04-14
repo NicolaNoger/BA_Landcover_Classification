@@ -16,4 +16,4 @@ lightning_logs/
 /models/
 /Organisation/
 /archive/
-
+*.qgz
