@@ -46,9 +46,10 @@ if __name__ == "__main__":
 
     print(f"Gefundene {len(img_files)} Bild-Masken-Paare.")
     
-    # --- 1. Statistik sammeln (Speichereffizient) ---
+    # --- 1. Statistik sammeln (Speichereffizient) ---  
     print("\nStarte ersten Durchgang: Sammeln der globalen Normalisierungsstatistik...")
     
+
     total_sum = None
     total_sq_sum = None
     total_count = 0
@@ -58,7 +59,7 @@ if __name__ == "__main__":
         with rasterio.open(file) as src:
             image = src.read().transpose((1, 2, 0)).astype(np.float32)
             if total_sum is None:
-                channel_count = image.shape[-1]
+                channel_count = image.shape[-1] 
                 total_sum = np.zeros(channel_count, dtype=np.float64)
                 total_sq_sum = np.zeros(channel_count, dtype=np.float64)
 
