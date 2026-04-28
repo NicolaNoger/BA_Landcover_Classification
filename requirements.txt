@@ -1,0 +1,14 @@
+# Core numerical and data handling
+numpy
+pandas
+scipy
+
+# Geospatial and point cloud processing
+rasterio
+laspy
+
+# Visualization and analysis
+matplotlib
+seaborn
+cycler
+statsmodels
