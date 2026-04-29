@@ -33,11 +33,17 @@ if gpus:
 
 class Config:
     # Paths
-    DATA_PATH = "/cfs/earth/scratch/nogernic/PA2/data/aerial/"
-    IMG_TILES_PATH = os.path.join(DATA_PATH, "img_tiles")
-    MASK_TILES_PATH = os.path.join(DATA_PATH, "mask_tiles")
-    OUTPUT_DIR = "models"
-    
+    PROJECT_ROOT = "A:/STUDIUM/06_Fruelingssemester26/BA"
+    DATA_PATH = os.path.join(PROJECT_ROOT, "processed", "layer_stacks")
+
+    TRAIN_IMG_PATH = os.path.join(DATA_PATH, "train", "img_snippets")
+    TRAIN_MASK_PATH = os.path.join(DATA_PATH, "train", "mask_snippets")
+    TEST_IMG_PATH = os.path.join(DATA_PATH, "test", "img_snippets")
+    TEST_MASK_PATH = os.path.join(DATA_PATH, "test", "mask_snippets")
+    NORM_STATS_PATH = os.path.join(DATA_PATH, "normalization_stats.json")
+
+    OUTPUT_DIR = os.path.join(PROJECT_ROOT, "models")
+
     # Dataset Parameter
     NUM_CLASSES = 8
     CLASS_NAMES = [
@@ -50,17 +56,16 @@ class Config:
         "Water",
         "Railway",
     ]
-    TRAIN_RATIO = 0.70  # 70% for training
-    VAL_RATIO = 0.15    # 15% for validation during training
-    TEST_RATIO = 0.15   # 15% for final testing (unseen data)
+    TRAIN_RATIO = 0.85  # Split only the pre-defined train snippets into train/val
+    VAL_RATIO = 0.15
 
     # Training Hyperparameter
-    BATCH_SIZE = 4  
-    EPOCHS = 25  
-    LEARNING_RATE = 5e-5  
-    
+    BATCH_SIZE = 4
+    EPOCHS = 25
+    LEARNING_RATE = 5e-5
+
     # Model Parameter
-    INPUT_SHAPE = (512, 512, 5)  # NIR + RGB + normalized height
+    INPUT_SHAPE = (512, 512, 7)  # 8 channels minus Number_of_Returns
     STEPS_PER_EPOCH = None
     VALIDATION_STEPS = None
     
@@ -90,90 +95,92 @@ def create_output_directory():
 
 
 def load_data():
-    """Loads and prepares data"""
+    """Loads and prepares pre-split train/test data with train-only normalization stats."""
     print("\n" + "="*70)
     print("STEP 1: LOAD DATA")
     print("="*70)
-    print(f"Loading data from:")
-    print(f"  - Images: {Config.IMG_TILES_PATH}")
-    print(f"  - Masks:  {Config.MASK_TILES_PATH}")
-    
-    dataset = load_npy_dataset(Config.IMG_TILES_PATH, Config.MASK_TILES_PATH)
-    
-    total_samples = dataset.cardinality().numpy()
-    print(f"Total Samples: {total_samples}")
-    
-    # Shuffle dataset before splitting (with fixed seed for reproducibility)
-    # Use buffer size of 1000 to avoid OOM
-    print("\nShuffling dataset with seed=42 for reproducible random split...")
-    BUFFER_SIZE = 1000  # Good balance: enough randomness, won't cause OOM
-    dataset = dataset.shuffle(BUFFER_SIZE, seed=42, reshuffle_each_iteration=False)
-    
-    # 2. Split into Training, Validation, and Test
-    print(f"\nSplitting dataset (Train/Val/Test: {Config.TRAIN_RATIO:.0%}/{Config.VAL_RATIO:.0%}/{Config.TEST_RATIO:.0%})...")
-    
-    # First split: separate test set
-    train_val_size = int(total_samples * (Config.TRAIN_RATIO + Config.VAL_RATIO))
-    test_size = total_samples - train_val_size
-    
-    train_val_dataset = dataset.take(train_val_size)
-    test_dataset = dataset.skip(train_val_size)
-    
-    # Second split: separate train and validation
-    train_size = int(train_val_size * (Config.TRAIN_RATIO / (Config.TRAIN_RATIO + Config.VAL_RATIO)))
-    val_size = train_val_size - train_size
-    
-    train_dataset = train_val_dataset.take(train_size)
-    val_dataset = train_val_dataset.skip(train_size)
-    
-    print(f"Training Samples:   {train_size} ({train_size/total_samples*100:.1f}%)")
-    print(f"Validation Samples: {val_size} ({val_size/total_samples*100:.1f}%)")
-    print(f"Test Samples:       {test_size} ({test_size/total_samples*100:.1f}%)")
-    
-    # 3. calculate Steps for training
+    print("Loading data from:")
+    print(f"  - Train Images: {Config.TRAIN_IMG_PATH}")
+    print(f"  - Train Masks:  {Config.TRAIN_MASK_PATH}")
+    print(f"  - Test Images:  {Config.TEST_IMG_PATH}")
+    print(f"  - Test Masks:   {Config.TEST_MASK_PATH}")
+    print(f"  - Norm Stats:   {Config.NORM_STATS_PATH}")
+
+    train_all_dataset = load_npy_dataset(
+        Config.TRAIN_IMG_PATH,
+        Config.TRAIN_MASK_PATH,
+        stats_path=Config.NORM_STATS_PATH,
+        normalize_images=True,
+        expected_channels=Config.INPUT_SHAPE[-1],
+    )
+    test_dataset = load_npy_dataset(
+        Config.TEST_IMG_PATH,
+        Config.TEST_MASK_PATH,
+        stats_path=Config.NORM_STATS_PATH,
+        normalize_images=True,
+        expected_channels=Config.INPUT_SHAPE[-1],
+    )
+
+    train_all_samples = train_all_dataset.cardinality().numpy()
+    test_size = test_dataset.cardinality().numpy()
+    print(f"Train pool samples: {train_all_samples}")
+    print(f"Fixed test samples: {test_size}")
+
+    print("\nShuffling train pool with seed=42 for reproducible train/val split...")
+    train_all_dataset = train_all_dataset.shuffle(1000, seed=42, reshuffle_each_iteration=False)
+
+    train_size = int(train_all_samples * Config.TRAIN_RATIO)
+    val_size = train_all_samples - train_size
+
+    train_dataset = train_all_dataset.take(train_size)
+    val_dataset = train_all_dataset.skip(train_size)
+
+    total_for_report = train_all_samples + test_size
+    print(f"Training Samples:   {train_size} ({train_size/max(total_for_report,1)*100:.1f}% of all)")
+    print(f"Validation Samples: {val_size} ({val_size/max(total_for_report,1)*100:.1f}% of all)")
+    print(f"Test Samples:       {test_size} ({test_size/max(total_for_report,1)*100:.1f}% of all)")
+
     Config.STEPS_PER_EPOCH = max(1, train_size // Config.BATCH_SIZE)
     Config.VALIDATION_STEPS = min(100, max(1, val_size // Config.BATCH_SIZE))
     print(f"Steps per Epoch:    {Config.STEPS_PER_EPOCH}")
     print(f"Validation Steps:   {Config.VALIDATION_STEPS} (limited to save memory)")
-    
-    # 4. Prepare Datasets
+
     print("\nPreparing Training Dataset...")
     train_batches = prepare_dataset(
-        train_dataset, 
+        train_dataset,
         batch_size=Config.BATCH_SIZE,
         num_classes=Config.NUM_CLASSES,
-        is_training=True
+        is_training=True,
     )
     print("Training Dataset ready")
-    
+
     print("Preparing Validation Dataset...")
     val_batches = prepare_dataset(
         val_dataset,
         batch_size=Config.BATCH_SIZE,
         num_classes=Config.NUM_CLASSES,
-        is_training=False  # No Shuffle, No Augment, No Repeat
+        is_training=False,
     )
     print("Validation Dataset ready")
-    
+
     print("Preparing Test Dataset...")
     test_batches = prepare_dataset(
         test_dataset,
         batch_size=Config.BATCH_SIZE,
         num_classes=Config.NUM_CLASSES,
-        is_training=False  # No Shuffle, No Augment, No Repeat
+        is_training=False,
     )
     print("Test Dataset ready")
-    
-    # 5. Check Data Format
+
     print("\nChecking Data Format...")
     for images, masks in train_batches.take(1):
-        print(f"Batch Images Shape: {images.shape}")  # (batch_size, 512, 512, 5)
-        print(f"Batch Masks Shape:  {masks.shape}")   # (batch_size, 512, 512, num_classes)
+        print(f"Batch Images Shape: {images.shape}")
+        print(f"Batch Masks Shape:  {masks.shape}")
         print(f"  Image dtype:        {images.dtype}")
         print(f"  Mask dtype:         {masks.dtype}")
         print(f"  Image value range:  [{images.numpy().min():.3f}, {images.numpy().max():.3f}]")
-        print(f"  Mask unique values: {np.unique(masks.numpy())}")  
-    
+        print(f"  Mask unique values: {np.unique(masks.numpy())}")
+
     return train_batches, val_batches, test_batches
 
 
