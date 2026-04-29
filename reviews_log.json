@@ -1,0 +1,22 @@
+{
+  "snippet_0000": {
+    "decision": "accept_prediction",
+    "timestamp": "2026-04-29T16:05:58.365952"
+  },
+  "snippet_0001": {
+    "decision": "accept_prediction",
+    "timestamp": "2026-04-29T16:06:04.224230"
+  },
+  "snippet_0002": {
+    "decision": "accept_prediction",
+    "timestamp": "2026-04-29T16:06:05.168664"
+  },
+  "snippet_0003": {
+    "decision": "keep_label",
+    "timestamp": "2026-04-29T16:06:06.591042"
+  },
+  "snippet_0004": {
+    "decision": "keep_label",
+    "timestamp": "2026-04-29T16:06:08.638099"
+  }
+}

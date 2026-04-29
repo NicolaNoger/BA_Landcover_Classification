@@ -6,29 +6,29 @@ from PIL import Image
 from datetime import datetime
 
 # =============================================================================
-# KONFIGURATION
+# CONFIGURATION
 # =============================================================================
 QUEUE_FILE = "review_queue.json"
 REVIEWS_FILE = "reviews_log.json"
-DEMO_MODE = True  # Setze auf False wenn echte Queue-Datei vorhanden
+DEMO_MODE = True  # Set to False if a real queue file is available
 
 # =============================================================================
-# HILFSFUNKTIONEN
+# HELPER FUNCTIONS
 # =============================================================================
 
 def create_dummy_image(shape, label_text):
-    """Erstelle ein Dummy-Bild mit Text."""
+    """Create a dummy image with text."""
     arr = np.random.randint(0, 255, shape, dtype=np.uint8)
     img = Image.fromarray(arr)
     return img
 
 def load_queue():
-    """Lade oder erstelle Demo-Queue."""
+    """Load or create demo queue."""
     if os.path.exists(QUEUE_FILE) and not DEMO_MODE:
         with open(QUEUE_FILE, 'r') as f:
             return json.load(f)
     else:
-        # Demo-Queue mit 5 Beispielen
+        # Demo queue with 5 examples
         return [
             {
                 'snippet': f'snippet_{i:04d}',
@@ -44,14 +44,14 @@ def load_queue():
         ]
 
 def load_reviews():
-    """Lade bisherige Reviews."""
+    """Load previous reviews."""
     if os.path.exists(REVIEWS_FILE):
         with open(REVIEWS_FILE, 'r') as f:
             return json.load(f)
     return {}
 
 def save_review(decision, snippet_id):
-    """Speichere eine Review-Entscheidung."""
+    """Save a review decision."""
     reviews = load_reviews()
     reviews[snippet_id] = {
         'decision': decision,
@@ -61,11 +61,11 @@ def save_review(decision, snippet_id):
         json.dump(reviews, f, indent=2)
 
 def get_dummy_or_real_image(path):
-    """Lade Bild oder zeige Dummy an."""
+    """Load image or show dummy."""
     if os.path.exists(path):
         return Image.open(path)
     else:
-        # Generiere Dummy (RGB, Maske, etc.)
+        # Generate dummy (RGB, mask, etc.)
         if 'rgb' in path.lower():
             return create_dummy_image((128, 128, 3), "RGB")
         else:
@@ -77,7 +77,7 @@ def get_dummy_or_real_image(path):
 
 st.set_page_config(page_title="Label Review Tool", layout="wide")
 
-# 1. State initialisieren
+# 1. Initialize state
 if 'current_index' not in st.session_state:
     st.session_state.current_index = 0
     st.session_state.queue = load_queue()
@@ -88,9 +88,9 @@ reviews = st.session_state.reviews
 current_index = st.session_state.current_index
 
 if current_index >= len(queue):
-    st.success("✅ Alle Items reviewed!")
+    st.success("✅ All items reviewed!")
     st.write(reviews)
-    if st.button("🔄 Neu starten"):
+    if st.button("🔄 Restart"):
         st.session_state.current_index = 0
         st.rerun()
 else:
@@ -102,7 +102,7 @@ else:
     with col_progress:
         st.metric("Progress", f"{current_index + 1}/{len(queue)}")
     
-    # 3. Item-Info
+    # 3. Item info
     st.divider()
     st.subheader(f"Snippet: {current_item['snippet']}")
     
@@ -116,26 +116,26 @@ else:
     
     st.divider()
     
-    # 4. Bilder anzeigen
-    st.subheader("Visuelle Vergleich")
+    # 4. Display images
+    st.subheader("Visual Comparison")
     col_rgb, col_gt, col_pred = st.columns(3)
     
     with col_rgb:
         img_rgb = get_dummy_or_real_image(current_item['rgb_path'])
-        st.image(img_rgb, caption="RGB Bild", use_container_width=True)
+        st.image(img_rgb, caption="RGB Image", use_container_width=True)
     
     with col_gt:
         img_gt = get_dummy_or_real_image(current_item['gt_mask_path'])
-        st.image(img_gt, caption="Ground Truth Maske", use_container_width=True)
+        st.image(img_gt, caption="Ground Truth Mask", use_container_width=True)
     
     with col_pred:
         img_pred = get_dummy_or_real_image(current_item['pred_mask_path'])
-        st.image(img_pred, caption="Prediction Maske", use_container_width=True)
+        st.image(img_pred, caption="Prediction Mask", use_container_width=True)
     
     st.divider()
     
-    # 5. Review Buttons
-    st.subheader("Entscheidung treffen")
+    # 5. Review buttons
+    st.subheader("Make a Decision")
     
     col_btn_accept, col_btn_keep, col_btn_both, col_btn_skip = st.columns(4)
     
@@ -146,36 +146,36 @@ else:
         st.rerun()
     
     with col_btn_accept:
-        if st.button("✅ Prediction übernehmen", use_container_width=True, key="accept"):
+        if st.button("✅ Accept Prediction", use_container_width=True, key="accept"):
             handle_decision("accept_prediction")
     
     with col_btn_keep:
-        if st.button("❌ Label behalten", use_container_width=True, key="keep"):
+        if st.button("❌ Keep Label", use_container_width=True, key="keep"):
             handle_decision("keep_label")
     
     with col_btn_both:
-        if st.button("⚠️ Beide falsch", use_container_width=True, key="both"):
+        if st.button("⚠️ Both Wrong", use_container_width=True, key="both"):
             handle_decision("both_wrong")
     
     with col_btn_skip:
-        if st.button("⏭️ Überspringen", use_container_width=True, key="skip"):
+        if st.button("⏭️ Skip", use_container_width=True, key="skip"):
             handle_decision("skipped")
     
     st.divider()
     
-    # 6. Statistik
+    # 6. Statistics
     if reviews:
-        st.subheader("📊 Review Statistik")
+        st.subheader("📊 Review Statistics")
         decision_counts = {}
         for v in reviews.values():
             decision_counts[v] = decision_counts.get(v, 0) + 1
         
         col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
         with col_stat1:
-            st.metric("✅ Akzeptiert", decision_counts.get("accept_prediction", 0))
+            st.metric("✅ Accepted", decision_counts.get("accept_prediction", 0))
         with col_stat2:
-            st.metric("❌ Behalten", decision_counts.get("keep_label", 0))
+            st.metric("❌ Kept", decision_counts.get("keep_label", 0))
         with col_stat3:
-            st.metric("⚠️ Beide falsch", decision_counts.get("both_wrong", 0))
+            st.metric("⚠️ Both Wrong", decision_counts.get("both_wrong", 0))
         with col_stat4:
-            st.metric("⏭️ Übersprungen", decision_counts.get("skipped", 0))
+            st.metric("⏭️ Skipped", decision_counts.get("skipped", 0))
