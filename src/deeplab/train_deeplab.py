@@ -23,7 +23,7 @@ except (ImportError, TypeError) as e:
     SKLEARN_AVAILABLE = False
 
 
-from U_net import build_unet
+from deeplab_v3plus import build_deeplabv3plus
 from dataloader import load_npy_dataset, prepare_dataset
 
 
@@ -122,7 +122,7 @@ def class_label(class_id):
 def create_output_directory():
     """creates output directory with timestamp"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(Config.OUTPUT_DIR, f"unet_{timestamp}")
+    output_dir = os.path.join(Config.OUTPUT_DIR, f"deeplab_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
 
@@ -270,7 +270,7 @@ def build_model():
     print("="*70)
     
     # 1. Create Model
-    model = build_unet(
+    model = build_deeplabv3plus(
         input_shape=Config.INPUT_SHAPE,
         num_classes=Config.NUM_CLASSES
     )
@@ -1265,13 +1265,13 @@ def save_model(model, output_dir):
         print(f" Complete model saved: {model_path} (SavedModel format)")
     except Exception as e:
         print(f"Warning: Could not save complete model: {e}")
-        print(f"   To load: model = build_unet(...); model.load_weights('{weights_path}')")
+        print(f"   To load: model = build_deeplabv3plus(...); model.load_weights('{weights_path}')")
 
 
 def main():
     """Main function - Executes complete training"""
     print("\n" + "="*70)
-    print("U-NET TRAINING PIPELINE")
+    print("DEEPLABV3+ TRAINING PIPELINE")
     print("="*70)
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
