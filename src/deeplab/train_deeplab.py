@@ -7,26 +7,10 @@ from datetime import datetime
 import matplotlib
 matplotlib.use('Agg')
 
-# PIL is used for PNG saving in callbacks (avoids matplotlib backend issues on HPC)
-try:
-    from PIL import Image as PilImage
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
-
-try:
-    from sklearn.metrics import confusion_matrix, classification_report, f1_score
-    SKLEARN_AVAILABLE = True
-except (ImportError, TypeError) as e:
-    print(f"Warning: sklearn/scipy not available: {e}")
-    print("  Confusion matrix and F1 scores will be skipped")
-    SKLEARN_AVAILABLE = False
-
-
+from PIL import Image as PilImage
+from sklearn.metrics import confusion_matrix, classification_report, f1_score
 from deeplab_v3plus import build_deeplabv3plus
 from dataloader import load_npy_dataset, prepare_dataset
-
-
 
 tf.config.optimizer.set_jit(False)
 gpus = tf.config.list_physical_devices('GPU')
@@ -35,6 +19,12 @@ if gpus:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
         print(f"GPU memory growth enabled for {len(gpus)} GPU(s)")
+        
+        # --- ANPASSUNG: Mixed Precision aktivieren (halbiert VRAM-Bedarf) ---
+        from tensorflow.keras import mixed_precision
+        mixed_precision.set_global_policy('mixed_float16')
+        print("Mixed Precision (float16) policy set.")
+        # --------------------------------------------------------------------
     except RuntimeError as e:
         print(f"GPU memory growth setting failed: {e}")
 
@@ -53,6 +43,10 @@ class Config:
     NORM_STATS_PATH = os.path.join(DATA_PATH, "normalization_stats.json")
 
     OUTPUT_DIR = os.path.join(PROJECT_ROOT, "models")
+    
+    # --- ANPASSUNG: Pfad zur lokalen Gewichte-Datei für ResNet50 ---
+    RESNET_WEIGHTS = os.path.join(PROJECT_ROOT, "models", "resnet50_weights.h5")
+    # ---------------------------------------------------------------
 
     # Dataset Parameter
     NUM_CLASSES = 8
@@ -66,61 +60,42 @@ class Config:
         "Water",
         "Railway",
     ]
-    TRAIN_RATIO = 0.85  # Split only the pre-defined train snippets into train/val
+    TRAIN_RATIO = 0.85  
     VAL_RATIO = 0.15
 
     # Training Hyperparameter
-    BATCH_SIZE = 8
+    BATCH_SIZE = 16  # --- ANPASSUNG: Auf 16 erhöht, da AMP jetzt aktiv ist ---
     EPOCHS = 50
-    LEARNING_RATE = 5e-4
+    LEARNING_RATE = 1e-4  
 
     # Model Parameter
-    INPUT_SHAPE = (512, 512, 7)  # 8 channels minus Number_of_Returns
+    INPUT_SHAPE = (512, 512, 7)  
     STEPS_PER_EPOCH = None
     VALIDATION_STEPS = None
     
     # Loss Function Selection
     USE_FOCAL_LOSS = True 
     FOCAL_GAMMA = 2.0      
-    # Empirically adjusted class weights based on Inverse-Frequency (downweight Water, upweight Intensive Culture)
     FOCAL_ALPHA = [1.41, 0.78, 0.78, 4.0, 0.69, 0.90, 0.30, 9.17]  
     
-    # Checkpoint Loading (set a path string if you want to continue from a compatible checkpoint)
     LOAD_CHECKPOINT = None
-    RESUME_TRAINING = False  # ← False = Fine-tuning mode
+    RESUME_TRAINING = False  
 
-    # ---------------------------------------------------------------------------
-    # Monitoring & Visualization (added)
-    # ---------------------------------------------------------------------------
-
-    # Channels used to build the RGB preview image (0-based index in the stack)
-    # Assumed order: NIR=0, R=1, G=2, B=3, nDSM=4, ...
+    # Visualization
     VIZ_RGB_CHANNELS = (1, 2, 3)
-
-    # How often (in epochs) to save side-by-side prediction PNG samples
     EPOCH_VIZ_INTERVAL = 5
-
-    # Number of fixed validation samples to visualize each interval
     EPOCH_VIZ_SAMPLES = 3
-
-    # Number of validation batches used inside PerClassIoUCallback
-    # (keep low to avoid slowing down training)
     PER_CLASS_IOU_VAL_BATCHES = 30
-
-    # Max number of mask files sampled for pixel-distribution analysis
-    # (set to None to scan all train masks – slower but more accurate)
     PIXEL_DIST_SAMPLE_LIMIT = 500
 
 
 def class_label(class_id):
-    """Returns label in 1-based numbering format from notes."""
     if 0 <= class_id < len(Config.CLASS_NAMES):
         return f"{class_id + 1}_{Config.CLASS_NAMES[class_id]}"
     return f"{class_id + 1}"
 
 
 def create_output_directory():
-    """creates output directory with timestamp"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(Config.OUTPUT_DIR, f"deeplab_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
@@ -128,7 +103,6 @@ def create_output_directory():
 
 
 def load_data():
-    """Loads and prepares pre-split train/test data with train-only normalization stats."""
     print("\n" + "="*70)
     print("STEP 1: LOAD DATA")
     print("="*70)
@@ -205,142 +179,80 @@ def load_data():
     )
     print("Test Dataset ready")
 
-    print("\nChecking Data Format...")
-    for images, masks in train_batches.take(1):
-        print(f"Batch Images Shape: {images.shape}")
-        print(f"Batch Masks Shape:  {masks.shape}")
-        print(f"  Image dtype:        {images.dtype}")
-        print(f"  Mask dtype:         {masks.dtype}")
-        print(f"  Image value range:  [{images.numpy().min():.3f}, {images.numpy().max():.3f}]")
-        print(f"  Mask unique values: {np.unique(masks.numpy())}")
-
     return train_batches, val_batches, test_batches
 
 
 def focal_loss(gamma=2.0, alpha=0.25):
-    """
-    Focal Loss for multi-class classification.
-    
-    Focal Loss focuses training on hard examples by down-weighting easy examples.
-    useful for class imbalance problems.
-    
-    Formula: FL(pt) = -alpha * (1-pt)^gamma * log(pt)
-    
-    Args:
-        gamma: Focusing parameter. Higher values focus more on hard examples.
-               - gamma=0: equivalent to categorical crossentropy
-               - gamma=2: default
-               - gamma=5: very strong focus on hard examples
-        alpha: Class balancing parameter (0-1). Lower values give less weight to well-classified examples.
-    
-    Returns:
-        Loss function compatible with Keras
-    
-    Reference: Lin et al. "Focal Loss for Dense Object Detection" (2017)
-    """
     def focal_loss_fixed(y_true, y_pred):
-        # Clip predictions to prevent log(0)
         epsilon = tf.keras.backend.epsilon()
         y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
-        
-        # Calculate cross entropy
         cross_entropy = -y_true * tf.math.log(y_pred)
-        
-        # Ensure alpha is a tensor if it's a list (for class balancing)
-        alpha_t = tf.constant(alpha, dtype=tf.float32) if isinstance(alpha, list) else alpha
-        
-        # Calculate focal weight: (1 - pt)^gamma
-        # pt is the probability of the true class
+        if isinstance(alpha, list):
+            alpha_t = tf.reshape(tf.constant(alpha, dtype=tf.float32), [1, 1, 1, -1])
+        else:
+            alpha_t = alpha
         pt = tf.reduce_sum(y_true * y_pred, axis=-1, keepdims=True)
+        pt = tf.clip_by_value(pt, epsilon, 1.0 - epsilon)
         focal_weight = tf.pow(1.0 - pt, gamma)
-        
-        # Apply focal weight and alpha
         focal_loss_value = alpha_t * focal_weight * cross_entropy
-        
-        # Sum over classes and return mean over batch
+        focal_loss_value = tf.clip_by_value(focal_loss_value, -100.0, 100.0)
         return tf.reduce_sum(focal_loss_value, axis=-1)
-    
     return focal_loss_fixed
 
 
 def build_model():
-    """Builds and compiles the U-Net model"""
     print("\n" + "="*70)
     print("STEP 2: BUILD MODEL")
     print("="*70)
     
-    # 1. Create Model
+    # --- ANPASSUNG: Übergabe des Pfads für die pre-trained Weights ---
     model = build_deeplabv3plus(
         input_shape=Config.INPUT_SHAPE,
-        num_classes=Config.NUM_CLASSES
+        num_classes=Config.NUM_CLASSES,
+        weights_path=Config.RESNET_WEIGHTS 
     )
+    # -----------------------------------------------------------------
     print("Model created")
     
-    # 2. compile Model
-    print("\nCompiling Model...")
-    class_weights = {i: 1.0 for i in range(Config.NUM_CLASSES)}
-    
-    print(f"Using class weights: {class_weights}")
-    
-    # Select loss function
+    print("\nCompiling model...")
+
     if Config.USE_FOCAL_LOSS:
         loss_fn = focal_loss(gamma=Config.FOCAL_GAMMA, alpha=Config.FOCAL_ALPHA)
-        loss_name = f"Focal Loss (gamma={Config.FOCAL_GAMMA}, alpha={Config.FOCAL_ALPHA})"
-        print(f"Loss Function: {loss_name}")
-        print("  → Focuses on hard-to-classify examples")
+        print(f"Loss: Focal (gamma={Config.FOCAL_GAMMA}, alpha={Config.FOCAL_ALPHA})")
     else:
         loss_fn = 'categorical_crossentropy'
-        loss_name = "Categorical Crossentropy"
-        print(f"Loss Function: {loss_name}")
-    
-    # ---------------------------------------------------------------------------
-    # Custom metrics: Keras MeanIoU and accuracy metrics do NOT handle
-    # one-hot labels + softmax predictions automatically.
-    # These wrappers apply argmax first so the values are correct.
-    # Without this, iou stays constant (0.4375) and accuracy is ~0.03.
-    # ---------------------------------------------------------------------------
+        print("Loss: Categorical Crossentropy")
 
     class ArgmaxMeanIoU(tf.keras.metrics.MeanIoU):
-        """MeanIoU that works with one-hot labels and softmax predictions."""
         def update_state(self, y_true, y_pred, sample_weight=None):
-            y_pred = tf.argmax(y_pred, axis=-1)
-            y_true = tf.argmax(y_true, axis=-1)
-            return super().update_state(y_true, y_pred, sample_weight)
+            return super().update_state(tf.argmax(y_true, -1), tf.argmax(y_pred, -1), sample_weight)
 
     class ArgmaxAccuracy(tf.keras.metrics.Metric):
-        """Pixel accuracy that works with one-hot labels and softmax predictions."""
-        def __init__(self, name='accuracy', **kwargs):
-            super().__init__(name=name, **kwargs)
+        def __init__(self, **kwargs):
+            super().__init__(name='accuracy', **kwargs)
             self._correct = self.add_weight(name='correct', initializer='zeros')
             self._total   = self.add_weight(name='total',   initializer='zeros')
-
         def update_state(self, y_true, y_pred, sample_weight=None):
-            y_pred_cls = tf.argmax(y_pred, axis=-1)
-            y_true_cls = tf.argmax(y_true, axis=-1)
-            match = tf.cast(tf.equal(y_pred_cls, y_true_cls), tf.float32)
-            self._correct.assign_add(tf.reduce_sum(match))
-            self._total.assign_add(tf.cast(tf.size(y_true_cls), tf.float32))
-
+            match = tf.equal(tf.argmax(y_pred, -1), tf.argmax(y_true, -1))
+            self._correct.assign_add(tf.reduce_sum(tf.cast(match, tf.float32)))
+            self._total.assign_add(tf.cast(tf.size(tf.argmax(y_true, -1)), tf.float32))
         def result(self):
             return self._correct / (self._total + tf.keras.backend.epsilon())
-
         def reset_state(self):
             self._correct.assign(0.0)
             self._total.assign(0.0)
 
-    # Use legacy Adam optimizer to avoid XLA issues with libdevice
+    optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=Config.LEARNING_RATE, clipvalue=1.0)
     model.compile(
-        optimizer=tf.keras.optimizers.legacy.Adam(learning_rate=Config.LEARNING_RATE),
+        optimizer=optimizer,
         loss=loss_fn,
         metrics=[
-            ArgmaxAccuracy(name='accuracy'),
-            tf.keras.metrics.CategoricalAccuracy(name='cat_accuracy'),
+            ArgmaxAccuracy(),
             ArgmaxMeanIoU(num_classes=Config.NUM_CLASSES, name='iou'),
         ]
     )
     print("Model compiled")
 
-    # 3. Load checkpoint if specified
     if Config.LOAD_CHECKPOINT:
         print("\n" + "-" * 70)
         print("LOADING CHECKPOINT")
@@ -348,33 +260,14 @@ def build_model():
         try:
             model.load_weights(Config.LOAD_CHECKPOINT)
             print(f"Loaded weights from: {Config.LOAD_CHECKPOINT}")
-            
-            if Config.RESUME_TRAINING:
-                print("  Mode: RESUME TRAINING (continuing from checkpoint)")
-                print("  Note: Optimizer state is NOT restored (starts fresh)")
-            else:
-                print("  Mode: FINE-TUNING (using pretrained weights)")
-                print("  Tip: You can change hyperparameters for fine-tuning")
         except Exception as e:
             print(f"ERROR: Could not load checkpoint: {e}")
-            print("  Starting training from scratch instead")
-    else:
-        print("\nNo checkpoint specified - training from scratch")
     
-    # 4. show Model Summary
-    print("\nModel Architecture:")
-    print("-" * 70)
-    model.summary()
-    
-    total_params = model.count_params()
-    print(f"\nTotal Parameters: {total_params:,}")
-    
-    return model, class_weights
+    return model
 
 
 # =============================================================================
-# CLASS COLOR PALETTE  (0-based class index → RGB uint8)
-# Used by all PIL-based visualizations – no matplotlib required.
+# CLASS COLOR PALETTE & VISUALIZATION HELPERS
 # =============================================================================
 CLASS_COLORS_VIZ = np.array([
     [ 20,  20,  20],   # 0: background / unlabeled
@@ -388,19 +281,11 @@ CLASS_COLORS_VIZ = np.array([
     [130,  60, 180],   # 8: Railway
 ], dtype=np.uint8)
 
-
 def _mask_hw_to_rgb(mask_hw: np.ndarray) -> np.ndarray:
-    """Convert HxW class mask (0-based) to HxWx3 uint8 color image."""
     idx = np.clip(mask_hw.astype(np.int32), 0, len(CLASS_COLORS_VIZ) - 1)
     return CLASS_COLORS_VIZ[idx]
 
-
 def _img_to_rgb_uint8(img_hwc: np.ndarray) -> np.ndarray:
-    """
-    Convert a normalized float32 HxWxC image to uint8 RGB using
-    percentile stretching (2–98 %) on the configured RGB channels.
-    Works without matplotlib.
-    """
     r, g, b = Config.VIZ_RGB_CHANNELS
     result = np.zeros((*img_hwc.shape[:2], 3), dtype=np.uint8)
     for out_c, in_c in enumerate([r, g, b]):
@@ -412,7 +297,6 @@ def _img_to_rgb_uint8(img_hwc: np.ndarray) -> np.ndarray:
             ch = np.zeros_like(ch)
         result[:, :, out_c] = ch.astype(np.uint8)
     return result
-
 
 # =============================================================================
 # NEW FUNCTION 1: Pixel-class distribution analysis
@@ -630,11 +514,6 @@ class EpochVisualizationCallback(tf.keras.callbacks.Callback):
         self._output_dir = output_dir
         self._interval   = Config.EPOCH_VIZ_INTERVAL
         self._n_samples  = Config.EPOCH_VIZ_SAMPLES
-        self._available  = PIL_AVAILABLE
-
-        if not self._available:
-            print("  [EpochVizCallback] PIL not available – visualization skipped.")
-            return
 
         # Pre-collect fixed samples (same snippets every epoch for comparability)
         self._images, self._true = [], []
@@ -646,8 +525,6 @@ class EpochVisualizationCallback(tf.keras.callbacks.Callback):
                 self._true.append(masks_np[i])
 
     def on_epoch_end(self, epoch, logs=None):
-        if not self._available:
-            return
         if (epoch + 1) % self._interval != 0:
             return
 
@@ -905,25 +782,25 @@ def setup_callbacks(output_dir, val_batches=None):
     print(f"ModelCheckpoint: {checkpoint_path} (TF checkpoint format)")
     
     
-    # 2. EarlyStopping - Stops training if no progress
+    # 2. EarlyStopping
     early_stop = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss',
-        patience=5,  # Waits 5 epochs without improvement
+        patience=8,                 # Increased: gives ReduceLROnPlateau room to work
         mode='min',
-        restore_best_weights=False,  # Don't restore, use ModelCheckpoint instead
-        verbose=1
+        restore_best_weights=True,  # Automatically restore weights from best epoch
+        verbose=1,
     )
     callbacks.append(early_stop)
-    print("EarlyStopping: patience=5 (no weight restore)")
-    
-    # 3. ReduceLROnPlateau - Reduces learning rate on plateau
+    print("EarlyStopping: patience=8, restore_best_weights=True")
+
+    # 3. ReduceLROnPlateau
     reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='val_loss',
-        factor=0.5,  # Halves learning rate
+        factor=0.5,
         patience=3,
         min_lr=1e-7,
         mode='min',
-        verbose=1
+        verbose=1,
     )
     callbacks.append(reduce_lr)
     print("ReduceLROnPlateau: factor=0.5, patience=3")
@@ -959,7 +836,7 @@ def setup_callbacks(output_dir, val_batches=None):
         )
 
     # 7. EpochVisualizationCallback – RGB/GT/Pred PNGs every N epochs
-    if val_batches is not None and PIL_AVAILABLE:
+    if val_batches is not None:
         epoch_viz_cb = EpochVisualizationCallback(
             val_dataset = val_batches,
             output_dir  = output_dir,
@@ -969,37 +846,23 @@ def setup_callbacks(output_dir, val_batches=None):
             f"EpochVisualizationCallback: saves prediction PNGs every "
             f"{Config.EPOCH_VIZ_INTERVAL} epochs → epoch_samples/"
         )
-    elif not PIL_AVAILABLE:
-        print("EpochVisualizationCallback: skipped (PIL not installed)")
 
     return callbacks
 
 
-def train_model(model, train_batches, val_batches, callbacks, class_weights=None):
-    """Trains the model"""
+def train_model(model, train_batches, val_batches, callbacks):
+    """Trains the model."""
     print("\n" + "="*70)
     print("STEP 4: START TRAINING")
     print("="*70)
+    print(f"\n  Epochs:           {Config.EPOCHS}")
+    print(f"  Batch size:       {Config.BATCH_SIZE}")
+    print(f"  Steps/epoch:      {Config.STEPS_PER_EPOCH}")
+    print(f"  Validation steps: {Config.VALIDATION_STEPS}")
 
-    print(f"\nTraining Configuration:")
-    print(f"  Epochs:             {Config.EPOCHS}")
-    print(f"  Batch Size:         {Config.BATCH_SIZE}")
-    print(f"  Steps per Epoch:    {Config.STEPS_PER_EPOCH}")
-    print(f"  Validation Steps:   {Config.VALIDATION_STEPS}")
-    print(f"  Number of Classes:  {Config.NUM_CLASSES}")
-    if class_weights:
-        print(f"  Class Weights:      Enabled (balancing underrepresented classes)")
-    print("\nTraining starts...\n")
-
-    # GPU Info
     gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        print(f"Training with GPU: {gpus[0].name}")
-    else:
-        print("Warning: No GPU found, training on CPU!")
-    print()
-    
-    # Perform training
+    print(f"  Device:           {gpus[0].name if gpus else 'CPU (no GPU found!)'}\n")
+
     history = model.fit(
         train_batches,
         epochs=Config.EPOCHS,
@@ -1007,9 +870,8 @@ def train_model(model, train_batches, val_batches, callbacks, class_weights=None
         validation_data=val_batches,
         validation_steps=Config.VALIDATION_STEPS,
         callbacks=callbacks,
-        verbose=1  # shows Progress Bar
+        verbose=1,
     )
-    
     print("\nTraining completed!")
     return history
 
@@ -1286,13 +1148,13 @@ def main():
         compute_pixel_distribution(Config.TRAIN_MASK_PATH, output_dir)
         
         # 2. Build model
-        model, class_weights = build_model()
+        model = build_model()
         
-        # 3. Setup callbacks – pass val_batches for new monitoring callbacks (added)
+        # 3. Setup callbacks
         callbacks = setup_callbacks(output_dir, val_batches=val_batches)
         
-        # 4. Train model with class weights
-        history = train_model(model, train_batches, val_batches, callbacks, class_weights)
+        # 4. Train
+        history = train_model(model, train_batches, val_batches, callbacks)
         
         # 5. Visualize training results (on validation set)
         plot_training_history(history, output_dir)

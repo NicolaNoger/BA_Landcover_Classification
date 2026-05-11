@@ -1,0 +1,54 @@
+dos2unix: converting file train_deeplab.py to Unix format...
+2026-05-10 23:50:21.167488: I tensorflow/core/platform/cpu_feature_guard.cc:193] This TensorFlow binary is optimized with oneAPI Deep Neural Network Library (oneDNN) to use the following CPU instructions in performance-critical operations:  AVX2 AVX512F AVX512_VNNI FMA
+To enable them in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-05-10 23:50:21.448700: I tensorflow/core/util/port.cc:104] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-05-10 23:50:25.286297: W tensorflow/compiler/xla/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libnvinfer.so.7'; dlerror: libnvinfer.so.7: cannot open shared object file: No such file or directory; LD_LIBRARY_PATH: /cfs/earth/scratch/nogernic/.conda/envs/unet_gpu/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/miniconda3-4.12.0-7riiqd3uthjsmxqkabjrfhfxhyh5epcl/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/cuda-11.6.2-xznziij4y265ms3yetqla6mzltkehgkq/lib64:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/libxml2-2.9.13-pzldlzlytouuztj5c7gufmlb325mqqa3/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/zlib-1.2.12-zzkcvmzkh45dp4t6j5zj6akg5l2sb55z/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/xz-5.2.5-bwf73pjillstutfajibobidhfzwhhywm/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/libiconv-1.16-sjorblrdlout2encxmxc5loqiszstm2o/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-8.5.0/gcc-9.4.0-orvdray5cdqb7rkjnygwee4u72jgsrsa/lib64:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-8.5.0/gcc-9.4.0-orvdray5cdqb7rkjnygwee4u72jgsrsa/lib:/cm/shared/apps/slurm/current/lib64/slurm:/cm/shared/apps/slurm/current/lib64
+2026-05-10 23:50:25.291234: W tensorflow/compiler/xla/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libnvinfer_plugin.so.7'; dlerror: libnvinfer_plugin.so.7: cannot open shared object file: No such file or directory; LD_LIBRARY_PATH: /cfs/earth/scratch/nogernic/.conda/envs/unet_gpu/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/miniconda3-4.12.0-7riiqd3uthjsmxqkabjrfhfxhyh5epcl/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/cuda-11.6.2-xznziij4y265ms3yetqla6mzltkehgkq/lib64:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/libxml2-2.9.13-pzldlzlytouuztj5c7gufmlb325mqqa3/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/zlib-1.2.12-zzkcvmzkh45dp4t6j5zj6akg5l2sb55z/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/xz-5.2.5-bwf73pjillstutfajibobidhfzwhhywm/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-9.4.0/libiconv-1.16-sjorblrdlout2encxmxc5loqiszstm2o/lib:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-8.5.0/gcc-9.4.0-orvdray5cdqb7rkjnygwee4u72jgsrsa/lib64:/cfs/software/uss/2022/spack/linux-rocky8-x86_64/gcc-8.5.0/gcc-9.4.0-orvdray5cdqb7rkjnygwee4u72jgsrsa/lib:/cm/shared/apps/slurm/current/lib64/slurm:/cm/shared/apps/slurm/current/lib64
+2026-05-10 23:50:25.292285: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Cannot dlopen some TensorRT libraries. If you would like to use Nvidia GPU with TensorRT, please make sure the missing libraries mentioned above are installed properly.
+2026-05-10 23:50:35.228725: I tensorflow/core/platform/cpu_feature_guard.cc:193] This TensorFlow binary is optimized with oneAPI Deep Neural Network Library (oneDNN) to use the following CPU instructions in performance-critical operations:  AVX2 AVX512F AVX512_VNNI FMA
+To enable them in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-05-10 23:50:38.283145: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1613] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 38208 MB memory:  -> device: 0, name: NVIDIA A100-PCIE-40GB, pci bus id: 0000:17:00.0, compute capability: 8.0
+WARNING:tensorflow:AutoGraph could not transform <function load_npy_dataset.<locals>.<lambda> at 0x15549b4eb3a0> and will run it as-is.
+Please report this to the TensorFlow team. When filing the bug, set the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and attach the full output.
+Cause: 'NoneType' object has no attribute '__dict__'
+To silence this warning, decorate the function with @tf.autograph.experimental.do_not_convert
+WARNING:tensorflow:AutoGraph could not transform <function load_npy_dataset.<locals>.<lambda> at 0x15549b4eb430> and will run it as-is.
+Please report this to the TensorFlow team. When filing the bug, set the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and attach the full output.
+Cause: 'NoneType' object has no attribute '__dict__'
+To silence this warning, decorate the function with @tf.autograph.experimental.do_not_convert
+WARNING:tensorflow:AutoGraph could not transform <function load_npy_dataset.<locals>.<lambda> at 0x15549b54e940> and will run it as-is.
+Please report this to the TensorFlow team. When filing the bug, set the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and attach the full output.
+Cause: 'NoneType' object has no attribute '__dict__'
+To silence this warning, decorate the function with @tf.autograph.experimental.do_not_convert
+WARNING:tensorflow:AutoGraph could not transform <function load_npy_dataset.<locals>.<lambda> at 0x15549b54e310> and will run it as-is.
+Please report this to the TensorFlow team. When filing the bug, set the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and attach the full output.
+Cause: 'NoneType' object has no attribute '__dict__'
+To silence this warning, decorate the function with @tf.autograph.experimental.do_not_convert
+WARNING:tensorflow:AutoGraph could not transform <function prepare_dataset.<locals>.<lambda> at 0x15549b4ebdc0> and will run it as-is.
+Please report this to the TensorFlow team. When filing the bug, set the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and attach the full output.
+Cause: 'NoneType' object has no attribute '__dict__'
+To silence this warning, decorate the function with @tf.autograph.experimental.do_not_convert
+WARNING:tensorflow:AutoGraph could not transform <function prepare_dataset.<locals>.<lambda> at 0x15549b4ebca0> and will run it as-is.
+Please report this to the TensorFlow team. When filing the bug, set the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and attach the full output.
+Cause: 'NoneType' object has no attribute '__dict__'
+To silence this warning, decorate the function with @tf.autograph.experimental.do_not_convert
+WARNING:tensorflow:AutoGraph could not transform <function prepare_dataset.<locals>.<lambda> at 0x15549b4eb1f0> and will run it as-is.
+Please report this to the TensorFlow team. When filing the bug, set the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and attach the full output.
+Cause: 'NoneType' object has no attribute '__dict__'
+To silence this warning, decorate the function with @tf.autograph.experimental.do_not_convert
+2026-05-10 23:50:49.113743: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:392] Filling up shuffle buffer (this may take a while): 344 of 1000
+2026-05-10 23:50:54.117759: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:417] Shuffle buffer filled.
+/cfs/earth/scratch/nogernic/.conda/envs/unet_gpu/lib/python3.9/site-packages/keras/applications/resnet.py:159: UserWarning: This model usually expects 1 or 3 input channels. However, it was passed an input_shape with 7 input channels.
+  input_shape = imagenet_utils.obtain_input_shape(
+2026-05-10 23:52:22.283312: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:392] Filling up shuffle buffer (this may take a while): 863 of 1000
+2026-05-10 23:52:23.031210: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:417] Shuffle buffer filled.
+2026-05-10 23:52:25.427831: I tensorflow/compiler/xla/stream_executor/cuda/cuda_dnn.cc:428] Loaded cuDNN version 8100
+2026-05-10 23:54:30.241670: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:392] Filling up shuffle buffer (this may take a while): 360 of 1000
+2026-05-10 23:54:35.922067: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:392] Filling up shuffle buffer (this may take a while): 971 of 1000
+2026-05-10 23:54:36.269738: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:417] Shuffle buffer filled.
+2026-05-10 23:54:37.027758: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:417] Shuffle buffer filled.
+2026-05-10 23:57:11.528433: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:392] Filling up shuffle buffer (this may take a while): 922 of 1000
+2026-05-10 23:57:12.251524: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:417] Shuffle buffer filled.
+2026-05-10 23:57:12.295497: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:392] Filling up shuffle buffer (this may take a while): 1 of 1000
+2026-05-10 23:57:21.547168: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:392] Filling up shuffle buffer (this may take a while): 928 of 1000
+2026-05-10 23:57:22.239739: I tensorflow/core/kernels/data/shuffle_dataset_op.cc:417] Shuffle buffer filled.
