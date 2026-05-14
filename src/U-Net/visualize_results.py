@@ -25,6 +25,28 @@ CLASS_NAMES = [
 ]
 CLASS_LABELS = [f"{i+1}_{name}" for i, name in enumerate(CLASS_NAMES)]
 
+
+def resolve_model_dir(model_dir: str) -> str:
+    """Resolve a model directory against common locations in this repo."""
+    if os.path.isabs(model_dir):
+        return model_dir
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(script_dir, os.pardir, os.pardir))
+
+    candidates = [
+        os.path.abspath(model_dir),
+        os.path.abspath(os.path.join(os.getcwd(), model_dir)),
+        os.path.abspath(os.path.join(repo_root, model_dir)),
+        os.path.abspath(os.path.join(script_dir, model_dir)),
+    ]
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    return os.path.abspath(os.path.join(repo_root, model_dir))
+
 def plot_training_history(csv_path, output_path):
     """Plots training history from CSV file"""
     print(f"Loading training history from: {csv_path}")
@@ -141,10 +163,10 @@ def visualize_predictions(sample_dir, output_path):
 def main():
     if len(sys.argv) < 2:
         print("Usage: python visualize_results.py <model_directory>")
-        print("Example: python visualize_results.py models/unet_final/")
+        print("Example: python visualize_results.py models/deeplab_20260511_115648/")
         sys.exit(1)
     
-    model_dir = sys.argv[1]
+    model_dir = resolve_model_dir(sys.argv[1])
     
     print("="*70)
     print("VISUALIZING TRAINING RESULTS")

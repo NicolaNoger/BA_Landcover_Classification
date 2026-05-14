@@ -32,16 +32,16 @@ import tensorflow as tf
 # =============================================================================
 
 class Config:
-    PROJECT_ROOT       = "A:/STUDIUM/06_Fruelingssemester26/BA"
-    DATA_PATH          = os.path.join(PROJECT_ROOT, "processed", "layer_stacks")
+    PROJECT_ROOT       = "/cfs/earth/scratch/nogernic/BA_2026"
+    DATA_PATH          = os.path.join(PROJECT_ROOT, "data", "training_data")
 
     TEST_IMG_PATH      = os.path.join(DATA_PATH, "test", "img_snippets")
     TEST_MASK_PATH     = os.path.join(DATA_PATH, "test", "mask_snippets")
     NORM_STATS_PATH    = os.path.join(DATA_PATH, "normalization_stats.json")
 
     # Path to saved model (SavedModel folder or .keras)
-    # → adjust after training
-    MODEL_PATH         = os.path.join(PROJECT_ROOT, "models", "DEIN_RUN/final_model")
+    # default: latest deeplab run in models/
+    MODEL_PATH         = os.path.join(PROJECT_ROOT, "models", "deeplab_20260511_115648", "final_model")
 
     # Ausgabe
     OUTPUT_DIR         = os.path.join(DATA_PATH, "label_review")
@@ -54,8 +54,8 @@ class Config:
     INPUT_CHANNELS     = 7
 
     # Blob filtering
-    CONFIDENCE_THRESHOLD = 0.90   # Only flag if model is very confident
-    MIN_BLOB_SIZE_PX     = 2000   # ~45x45 px minimum – avoids tiny noise blobs
+    CONFIDENCE_THRESHOLD = 0.80   # Only flag if model is very confident
+    MIN_BLOB_SIZE_PX     = 15000   # ~45x45 px minimum – avoids tiny noise blobs
     MAX_BLOBS_PER_PAIR   = 30     # Safety cap per (GT-class, Pred-class) combination
 
     # Which channels to show as RGB (0-based)
@@ -366,7 +366,7 @@ def main():
     os.makedirs(Config.OVERLAYS_DIR, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # 1. Modell laden
+    # 1. Modell laden (robust: SavedModel OR Architektur+Weights)
     # ------------------------------------------------------------------
     if not os.path.exists(Config.MODEL_PATH):
         print(f"\nFEHLER: Modell nicht gefunden: {Config.MODEL_PATH}")
@@ -376,7 +376,59 @@ def main():
         sys.exit(1)
 
     print(f"\nLade Modell …")
-    model = tf.keras.models.load_model(Config.MODEL_PATH, compile=False)
+    model = None
+    try:
+        model = tf.keras.models.load_model(Config.MODEL_PATH, compile=False)
+        print("  Loaded model via tf.keras.models.load_model")
+    except Exception as e:
+        print("  tf.keras.models.load_model failed:", str(e))
+        print("  Versuch: Architektur bauen und Gewichte laden (fallback)")
+        # ensure local src is importable
+        src_root = os.path.join(Config.PROJECT_ROOT, "src")
+        if src_root not in sys.path:
+            sys.path.insert(0, src_root)
+        try:
+            from deeplab.deeplab_v3plus import build_deeplabv3plus
+
+            # assume common snippet size 512x512 – adjust with --model if needed
+            input_shape = (512, 512, Config.INPUT_CHANNELS)
+            model = build_deeplabv3plus(input_shape=input_shape, num_classes=Config.NUM_CLASSES, weights_path=None)
+
+            # try to locate weights file inside supplied path
+            loaded_weights = None
+            if os.path.isdir(Config.MODEL_PATH):
+                candidates = [
+                    os.path.join(Config.MODEL_PATH, "final_model_weights.h5"),
+                    os.path.join(Config.MODEL_PATH, "best_model_weights.h5"),
+                    os.path.join(Config.MODEL_PATH, "final_model_weights.hdf5"),
+                ]
+                for c in candidates:
+                    if os.path.exists(c):
+                        model.load_weights(c)
+                        loaded_weights = c
+                        break
+            if loaded_weights is None:
+                # try loading the path directly (may be .h5 or checkpoint)
+                try:
+                    model.load_weights(Config.MODEL_PATH)
+                    loaded_weights = Config.MODEL_PATH
+                except Exception:
+                    pass
+
+            if loaded_weights:
+                print(f"  Weights loaded from: {loaded_weights}")
+            else:
+                print("  WARNING: No matching weights file found inside the given model path.")
+                print("  Please point --model to a SavedModel folder or a .h5 weights file.")
+        except Exception as e2:
+            print("  Fallback failed:", str(e2))
+            print("  Cannot load model. Abbruch.")
+            sys.exit(1)
+
+    if model is None:
+        print("  ERROR: Model object is None after loading attempts.")
+        sys.exit(1)
+
     print(f"  Input:  {model.input_shape}")
     print(f"  Output: {model.output_shape}")
     print(f"\nLoading model …")

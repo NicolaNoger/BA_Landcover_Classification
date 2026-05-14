@@ -19,6 +19,7 @@ Decisions per blob:
 """
 
 import os
+import sys
 import json
 import numpy as np
 import streamlit as st
@@ -30,8 +31,8 @@ from datetime import datetime
 # CONFIGURATION — adjust paths to your environment
 # =============================================================================
 
-PROJECT_ROOT    = "A:/STUDIUM/06_Fruelingssemester26/BA/data"
-DATA_PATH       = os.path.join(PROJECT_ROOT, "processed", "training_data")
+PROJECT_ROOT    = "A:/STUDIUM/06_Fruelingssemester26/BA"
+DATA_PATH       = os.path.join(PROJECT_ROOT, "data", "processed", "training_data")
 
 QUEUE_FILE      = os.path.join(DATA_PATH, "label_review", "review_queue.json")
 REVIEWS_FILE    = os.path.join(DATA_PATH, "label_review", "reviews_log.json")
@@ -101,17 +102,20 @@ DECISION_LABELS = {
 # HILFSFUNKTIONEN
 # =============================================================================
 
-@st.cache_data
 def load_queue(queue_file: str) -> list:
-    """Load review_queue.json. Cached to avoid re-loading on every interaction."""
+    """Load review_queue.json and remap remote paths to local copies."""
     if not os.path.exists(queue_file):
         return []
     with open(queue_file, "r", encoding="utf-8") as f:
         queue = json.load(f)
 
     # If queue entries reference remote/HPC absolute paths, try to remap to
-    # locally copied overlays/npy files under DATA_PATH/label_review.
-    local_dir = os.path.join(DATA_PATH, "label_review")
+    # locally copied files. Priority: overlays/ > test/img_snippets/ > test/mask_snippets/
+    base_dir = os.path.join(DATA_PATH, "label_review")
+    overlays_dir = os.path.join(base_dir, "overlays")
+    img_snippets_dir = os.path.join(DATA_PATH, "test", "img_snippets")
+    mask_snippets_dir = os.path.join(DATA_PATH, "test", "mask_snippets")
+
     for item in queue:
         for key in ("overlay_rgb_path", "overlay_gt_path", "overlay_pred_path",
                     "blob_mask_npy", "img_npy_path", "mask_npy_path"):
@@ -121,10 +125,22 @@ def load_queue(queue_file: str) -> list:
             # if path exists locally already, keep it
             if os.path.exists(p):
                 continue
-            # try remapping to local_dir by basename
-            candidate = os.path.join(local_dir, os.path.basename(p))
-            if os.path.exists(candidate):
-                item[key] = candidate
+            # try remapping by basename
+            basename = os.path.basename(p)
+            candidates = [
+                os.path.join(overlays_dir, basename),
+                os.path.join(img_snippets_dir, basename),
+                os.path.join(mask_snippets_dir, basename),
+                os.path.join(base_dir, basename),
+            ]
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    item[key] = candidate
+                    print(f"DEBUG [load_queue] {key}: {p} -> {candidate}", file=sys.stderr)
+                    break
+            else:
+                # No candidate found
+                print(f"DEBUG [load_queue] {key}: NOT FOUND - {basename}", file=sys.stderr)
 
     return queue
 
@@ -144,10 +160,19 @@ def save_reviews(reviews: dict, reviews_file: str) -> None:
 
 
 def load_image_safe(path: str) -> Image.Image | None:
-    """Load PNG image; return None if file is missing."""
-    if path and os.path.exists(path):
-        return Image.open(path).convert("RGB")
-    return None
+    """Load PNG image; accept truncated files; return None if missing/corrupted."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        # Allow PIL to load truncated images
+        Image.LOAD_TRUNCATED_IMAGES = True
+        img = Image.open(path)
+        img.load()  # Force load to catch errors early
+        return img.convert("RGB")
+    except Exception as e:
+        # Log warning and skip corrupted images
+        print(f"Warning: Failed to load image {path}: {e}", file=sys.stderr)
+        return None
 
 
 def placeholder_image(text: str, size: int = 300) -> Image.Image:
@@ -239,8 +264,11 @@ def render_sidebar(queue: list, reviews: dict, current_index: int) -> None:
     st.sidebar.title("Progress")
 
     total     = len(queue)
-    reviewed  = len(reviews)
-    remaining = total - reviewed
+    reviewed_total = len(reviews)
+    reviewed  = min(reviewed_total, total)
+    remaining = max(0, total - reviewed)
+    max_index = max(0, total - 1)
+    safe_current_index = min(max(0, current_index), max_index)
 
     st.sidebar.metric("Total",      total)
     st.sidebar.metric("Reviewed",   reviewed)
@@ -249,6 +277,9 @@ def render_sidebar(queue: list, reviews: dict, current_index: int) -> None:
     if total > 0:
         pct = reviewed / total * 100
         st.sidebar.progress(reviewed / total, text=f"{pct:.1f}%")
+
+    if reviewed_total > total:
+        st.sidebar.caption(f"Note: {reviewed_total - total} review entries are outside current queue.")
 
     if reviews:
         st.sidebar.divider()
@@ -268,14 +299,15 @@ def render_sidebar(queue: list, reviews: dict, current_index: int) -> None:
     st.sidebar.caption(f"Corrected masks: `{CLEAN_MASK_DIR}`")
 
     # Navigation: jump to a specific index
-    target = st.sidebar.number_input(
-        "Jump to blob index (0-based)",
-        min_value=0, max_value=max(0, total - 1),
-        value=current_index, step=1,
-    )
-    if st.sidebar.button("Jump"):
-        st.session_state.current_index = int(target)
-        st.rerun()
+    if total > 0:
+        target = st.sidebar.number_input(
+            "Jump to blob index (0-based)",
+            min_value=0, max_value=max_index,
+            value=safe_current_index, step=1,
+        )
+        if st.sidebar.button("Jump"):
+            st.session_state.current_index = int(target)
+            st.rerun()
 
 
 # =============================================================================
@@ -290,6 +322,23 @@ def class_badge(class_id: int, class_name: str) -> str:
         f'border-radius:12px;font-weight:bold;font-size:0.9em;">'
         f'{class_id} – {class_name}</span>'
     )
+
+
+def class_legend_html() -> str:
+    """Return HTML for the class color legend."""
+    legend = '<div style="background:#f0f0f0;padding:15px;border-radius:8px;font-size:0.85em;color:#333;">'  
+    legend += '<b>Class Legend</b><br><br>'
+    for class_id in sorted(CLASS_NAMES.keys()):
+        name = CLASS_NAMES[class_id]
+        color = CLASS_COLORS_HEX.get(class_id, "#888888")
+        legend += (
+            f'<div style="display:flex;align-items:center;margin-bottom:8px;color:#333;">'
+            f'<div style="width:20px;height:20px;background:{color};border-radius:3px;margin-right:10px;"></div>'
+            f'<span>{class_id} – {name}</span>'
+            f'</div>'
+        )
+    legend += '</div>'
+    return legend
 
 
 # =============================================================================
@@ -312,6 +361,14 @@ def main():
     # Queue + Reviews laden
     queue   = load_queue(QUEUE_FILE)
     reviews = load_reviews(REVIEWS_FILE)
+
+    if queue:
+        st.session_state.current_index = min(
+            max(0, st.session_state.current_index),
+            len(queue) - 1,
+        )
+    else:
+        st.session_state.current_index = 0
 
     # Sidebar
     render_sidebar(queue, reviews, st.session_state.current_index)
@@ -361,76 +418,57 @@ def main():
     item = queue[idx]
 
     # ------------------------------------------------------------------
-    # HEADER
+    # COMPACT HEADER: Blob number, size, confidence, snippet name
     # ------------------------------------------------------------------
     st.title("Label Review Tool")
-
-    col_h1, col_h2, col_h3, col_h4 = st.columns([2, 2, 2, 2])
+    
+    col_h1, col_h2, col_h3, col_h4 = st.columns([1, 1, 1, 2])
     with col_h1:
-        st.metric("Blob", f"{idx + 1} / {len(queue)}")
+        st.metric("Blob", f"{idx + 1}/{len(queue)}", label_visibility="collapsed")
     with col_h2:
-        st.metric("Size", f"{item['blob_size_px']:,} px")
+        st.metric("Size", f"{item['blob_size_px']:,}px", label_visibility="collapsed")
     with col_h3:
-        st.metric("Mean Confidence", f"{item['confidence_mean']:.1%}")
+        st.metric("μ Conf.", f"{item['confidence_mean']:.0%}", label_visibility="collapsed")
     with col_h4:
-        st.metric("Min Confidence", f"{item['confidence_min']:.1%}")
-
-    st.divider()
+        # Show class transition
+        label_badge = class_badge(item["label_class_id"], item["label_class_name"])
+        pred_badge = class_badge(item["pred_class_id"], item["pred_class_name"])
+        st.markdown(f"{label_badge} → {pred_badge}", unsafe_allow_html=True)
+        st.caption(f"📍 {item['snippet']} (Region: `{item['region_id']}`)")
 
     # ------------------------------------------------------------------
-    # SNIPPET-INFO
+    # VISUAL ANALYSIS (left) + CLASS LEGEND (right)
     # ------------------------------------------------------------------
-    st.subheader(f"{item['snippet']}")
-    st.caption(f"Region ID: `{item['region_id']}`")
-
-    col_gt, col_arrow, col_pred = st.columns([5, 1, 5])
-    with col_gt:
-        st.markdown("**Ground Truth (current label):**")
-        st.markdown(
-            class_badge(item["label_class_id"], item["label_class_name"]),
-            unsafe_allow_html=True,
+    st.subheader("Visual analysis & Decision")
+    
+    col_images, col_legend = st.columns([3, 1])
+    
+    with col_images:
+        st.caption(
+            "Highlighted area = flagged blob. "
+            "Left: RGB · Middle: label · Right: prediction"
         )
-    with col_arrow:
-        st.markdown("<br><br><h2 style='text-align:center'>→</h2>", unsafe_allow_html=True)
-    with col_pred:
-        st.markdown("**Modell-Vorhersage:**")
-        st.markdown(
-            class_badge(item["pred_class_id"], item["pred_class_name"]),
-            unsafe_allow_html=True,
-        )
+        
+        rgb_img  = load_image_safe(item.get("overlay_rgb_path"))
+        gt_img   = load_image_safe(item.get("overlay_gt_path"))
+        pred_img = load_image_safe(item.get("overlay_pred_path"))
+        placeholder = placeholder_image("Missing image")
+        
+        col_rgb, col_gt_img, col_pred_img = st.columns(3)
+        with col_rgb:
+            st.image(rgb_img or placeholder, caption="RGB", use_container_width=True)
+        with col_gt_img:
+            st.image(gt_img or placeholder, caption=f"Label: {item['label_class_name']}", use_container_width=True)
+        with col_pred_img:
+            st.image(pred_img or placeholder, caption=f"Pred: {item['pred_class_name']}\n({item['confidence_mean']:.0%})", use_container_width=True)
+    
+    with col_legend:
+        st.markdown(class_legend_html(), unsafe_allow_html=True)
 
     st.divider()
 
     # ------------------------------------------------------------------
-    # OVERLAY-BILDER
-    # ------------------------------------------------------------------
-    st.subheader("Visual analysis")
-    st.caption(
-        "Highlighted area = flagged blob. "
-        "Left: RGB image · Middle: current label · Right: model prediction"
-    )
-
-    col_rgb, col_gt_img, col_pred_img = st.columns(3)
-
-    rgb_img  = load_image_safe(item.get("overlay_rgb_path"))
-    gt_img   = load_image_safe(item.get("overlay_gt_path"))
-    pred_img = load_image_safe(item.get("overlay_pred_path"))
-
-    placeholder = placeholder_image("Missing image")
-
-    with col_rgb:
-        st.image(rgb_img or placeholder, caption="RGB (true color)", use_container_width=True)
-    with col_gt_img:
-        caption_gt = f"Label: {item['label_class_name']}"
-        st.image(gt_img or placeholder, caption=caption_gt, use_container_width=True)
-    with col_pred_img:
-        caption_pred = f"Prediction: {item['pred_class_name']} ({item['confidence_mean']:.0%})"
-        st.image(pred_img or placeholder, caption=caption_pred, use_container_width=True)
-
-    st.divider()
-
-    # ------------------------------------------------------------------
-    # ENTSCHEIDUNGS-BUTTONS
+    # DECISION BUTTONS
     # ------------------------------------------------------------------
     st.subheader("Your decision")
 
@@ -459,41 +497,41 @@ def main():
 
     with col_b1:
         if st.button(
-            f"Accept prediction\n{item['pred_class_name']}",
+            f"✓ Accept\n{item['pred_class_name']}",
             use_container_width=True, key="btn_accept",
             type="primary",
-            help="Set blob pixels in the mask to the model prediction and save.",
+            help="Set blob pixels to model prediction",
         ):
             decide("accept_prediction")
 
     with col_b2:
         if st.button(
-            f"Keep label\n{item['label_class_name']}",
+            f"✓ Keep\n{item['label_class_name']}",
             use_container_width=True, key="btn_keep",
-            help="The original label is correct. No change.",
+            help="Label is correct, no change",
         ):
             decide("keep_label")
 
     with col_b3:
         if st.button(
-            "Both wrong\nManual correction",
+            "✗ Both\nManual needed",
             use_container_width=True, key="btn_both",
-            help="Neither label nor prediction is correct. Mark blob as unclear.",
+            help="Neither is correct",
         ):
             decide("both_wrong")
 
     with col_b4:
         if st.button(
-            "Skip\nDecide later",
+            "⏭ Skip\nLater",
             use_container_width=True, key="btn_skip",
-            help="Skip this blob for now (it remains in the queue).",
+            help="Decide later",
         ):
             decide("skipped")
 
     st.divider()
 
     # ------------------------------------------------------------------
-    # KONTEXT: Alle Blobs dieses Snippets
+    # OPTIONAL: Show all blobs in this snippet (bottom, expandable)
     # ------------------------------------------------------------------
     same_snippet = [
         (i, q) for i, q in enumerate(queue)
@@ -516,19 +554,6 @@ def main():
                 if st.button(label, key=f"nav_blob_{q_idx}"):
                     st.session_state.current_index = q_idx
                     st.rerun()
-
-    # ------------------------------------------------------------------
-    # LEGENDE
-    # ------------------------------------------------------------------
-    with st.expander("Class legend", expanded=False):
-        cols = st.columns(4)
-        for i, (cid, cname) in enumerate(CLASS_NAMES.items()):
-            with cols[i % 4]:
-                st.markdown(
-                    class_badge(cid, cname),
-                    unsafe_allow_html=True,
-                )
-                st.write("")
 
 
 if __name__ == "__main__":
