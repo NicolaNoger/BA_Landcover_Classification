@@ -24,6 +24,7 @@ from datetime import datetime
 
 from PIL import Image
 from scipy.ndimage import label as scipy_label, binary_dilation
+from skimage.morphology import reconstruction, binary_closing, disk
 import tensorflow as tf
 
 
@@ -54,8 +55,18 @@ class Config:
     INPUT_CHANNELS     = 7
 
     # Blob filtering
-    CONFIDENCE_THRESHOLD = 0.80   # Only flag if model is very confident
-    MIN_BLOB_SIZE_PX     = 15000   # ~45x45 px minimum – avoids tiny noise blobs
+    # Hysteresis (Seed & Grow):
+    #   seed pixels: high-confidence wrong predictions (definite core)
+    #   grow pixels: lower-confidence wrong predictions adjacent to seed
+    #   → border pixels at 60-80% confidence are included IF they touch a seed
+    #   → isolated low-confidence regions are ignored
+    CONFIDENCE_THRESHOLD = 0.80   # Seed threshold – high-confidence core pixels
+    GROW_THRESHOLD       = 0.60   # Grow threshold – border pixels connected to seed
+    # Morphological closing after grow:
+    #   fills small internal gaps (e.g. roof shadows inside a building)
+    #   disk(6) = ~12px diameter, fast, does not merge separate objects
+    CLOSING_RADIUS       = 15
+    MIN_BLOB_SIZE_PX     = 15000   # Minimum blob size after grow + closing
     MAX_BLOBS_PER_PAIR   = 30     # Safety cap per (GT-class, Pred-class) combination
 
     # Which channels to show as RGB (0-based)
@@ -247,15 +258,28 @@ def extract_blobs(
 
     Returns: list of dicts (one dict per queue entry)
     """
-    # Pixel-wise best class (1-based) and confidence
-    pred_class_hw   = (np.argmax(pred_probs, axis=-1) + 1).astype(np.uint8)
-    confidence_hw   = np.max(pred_probs, axis=-1).astype(np.float32)
+    pred_class_hw = (np.argmax(pred_probs, axis=-1) + 1).astype(np.uint8)
+    confidence_hw = np.max(pred_probs, axis=-1).astype(np.float32)
 
-    # Global disagreement mask
-    disagree_global = (
-        (confidence_hw >= Config.CONFIDENCE_THRESHOLD) &
-        (pred_class_hw != gt_mask_hw)
-    )
+    wrong_class = pred_class_hw != gt_mask_hw
+
+    # --- Hysteresis thresholding (Seed & Grow) ---
+    # seed: high-confidence wrong pixels → definite disagreement cores
+    # grow: lower-confidence wrong pixels → candidate border pixels
+    # reconstruction expands seed into grow, but ONLY where pixels are adjacent.
+    # Isolated low-confidence patches (no seed neighbour) are discarded.
+    seed_mask = wrong_class & (confidence_hw >= Config.CONFIDENCE_THRESHOLD)
+    grow_mask = wrong_class & (confidence_hw >= Config.GROW_THRESHOLD)
+
+    if not seed_mask.any():
+        return []
+
+    # seed ⊆ grow is guaranteed since CONFIDENCE_THRESHOLD > GROW_THRESHOLD
+    disagree_global = reconstruction(
+        seed_mask.astype(np.uint8),
+        grow_mask.astype(np.uint8),
+        method="dilation",
+    ).astype(bool)
 
     if not disagree_global.any():
         return []
@@ -263,7 +287,6 @@ def extract_blobs(
     queue_entries = []
     blob_counter  = 0
 
-    # For each unique (GT class, Pred class) pair, perform CC analysis
     unique_gt_classes = np.unique(gt_mask_hw[disagree_global])
 
     for gt_cls in unique_gt_classes:
@@ -275,6 +298,24 @@ def extract_blobs(
                 continue
 
             specific = mask_gt_cls & (pred_class_hw == pred_cls)
+
+            # Morphological closing: fills small internal gaps (e.g. roof shadows)
+            # Applied only to the bounding box of the current blob for speed.
+            # disk(CLOSING_RADIUS) should be small (≤8) to avoid merging
+            # separate objects or causing edge artefacts on small crops.
+            if Config.CLOSING_RADIUS > 0 and specific.any():
+                rows, cols = np.where(specific)
+                pad = Config.CLOSING_RADIUS
+                y1  = max(0,               int(rows.min()) - pad)
+                y2  = min(specific.shape[0], int(rows.max()) + pad + 1)
+                x1  = max(0,               int(cols.min()) - pad)
+                x2  = min(specific.shape[1], int(cols.max()) + pad + 1)
+                crop = specific[y1:y2, x1:x2]
+                closed = binary_closing(crop, footprint=disk(Config.CLOSING_RADIUS))
+                out = np.zeros_like(specific)
+                out[y1:y2, x1:x2] = closed
+                specific = out
+
             labeled, n_features = scipy_label(specific)
 
             for feat_id in range(1, n_features + 1):
@@ -338,9 +379,11 @@ def parse_args():
     p.add_argument("--model",      default=Config.MODEL_PATH,
                    help="Path to trained model (SavedModel folder or .keras)")
     p.add_argument("--threshold",  type=float, default=Config.CONFIDENCE_THRESHOLD,
-                   help="Confidence threshold (default: 0.90)")
+                   help=f"Seed confidence threshold (default: {Config.CONFIDENCE_THRESHOLD})")
+    p.add_argument("--grow",       type=float, default=Config.GROW_THRESHOLD,
+                   help=f"Grow confidence threshold (default: {Config.GROW_THRESHOLD})")
     p.add_argument("--min-blob",   type=int,   default=Config.MIN_BLOB_SIZE_PX,
-                   help="Minimum blob size in pixels (default: 2000)")
+                   help=f"Minimum blob size in pixels (default: {Config.MIN_BLOB_SIZE_PX})")
     return p.parse_args()
 
 
@@ -348,90 +391,34 @@ def main():
     args = parse_args()
     Config.MODEL_PATH            = args.model
     Config.CONFIDENCE_THRESHOLD  = args.threshold
+    Config.GROW_THRESHOLD        = args.grow
     Config.MIN_BLOB_SIZE_PX      = args.min_blob
 
     print("=" * 70)
     print("GENERATE REVIEW QUEUE")
     print("=" * 70)
-    print(f"Gestartet:           {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Modell:              {Config.MODEL_PATH}")
-    print(f"Confidence-Schwelle: {Config.CONFIDENCE_THRESHOLD:.0%}")
-    print(f"Min. Blob-Grösse:    {Config.MIN_BLOB_SIZE_PX} px")
-    print(f"Started:             {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Model:               {Config.MODEL_PATH}")
-    print(f"Confidence threshold: {Config.CONFIDENCE_THRESHOLD:.0%}")
-    print(f"Min. blob size:      {Config.MIN_BLOB_SIZE_PX} px")
+    print(f"Started:        {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Model:          {Config.MODEL_PATH}")
+    print(f"Seed threshold: {Config.CONFIDENCE_THRESHOLD:.0%}")
+    print(f"Grow threshold: {Config.GROW_THRESHOLD:.0%}")
+    print(f"Min blob size:  {Config.MIN_BLOB_SIZE_PX} px")
+    print(f"Closing radius: {Config.CLOSING_RADIUS} px")
 
     os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
     os.makedirs(Config.OVERLAYS_DIR, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # 1. Modell laden (robust: SavedModel OR Architektur+Weights)
+    # 1. Load model
     # ------------------------------------------------------------------
     if not os.path.exists(Config.MODEL_PATH):
-        print(f"\nFEHLER: Modell nicht gefunden: {Config.MODEL_PATH}")
-        print("→ Bitte Config.MODEL_PATH (oder --model Argument) anpassen.")
         print(f"\nERROR: Model not found: {Config.MODEL_PATH}")
-        print("→ Please adjust Config.MODEL_PATH (or use --model argument).")
+        print("→ Adjust Config.MODEL_PATH or use --model argument.")
         sys.exit(1)
 
-    print(f"\nLade Modell …")
-    model = None
-    try:
-        model = tf.keras.models.load_model(Config.MODEL_PATH, compile=False)
-        print("  Loaded model via tf.keras.models.load_model")
-    except Exception as e:
-        print("  tf.keras.models.load_model failed:", str(e))
-        print("  Versuch: Architektur bauen und Gewichte laden (fallback)")
-        # ensure local src is importable
-        src_root = os.path.join(Config.PROJECT_ROOT, "src")
-        if src_root not in sys.path:
-            sys.path.insert(0, src_root)
-        try:
-            from deeplab.deeplab_v3plus import build_deeplabv3plus
-
-            # assume common snippet size 512x512 – adjust with --model if needed
-            input_shape = (512, 512, Config.INPUT_CHANNELS)
-            model = build_deeplabv3plus(input_shape=input_shape, num_classes=Config.NUM_CLASSES, weights_path=None)
-
-            # try to locate weights file inside supplied path
-            loaded_weights = None
-            if os.path.isdir(Config.MODEL_PATH):
-                candidates = [
-                    os.path.join(Config.MODEL_PATH, "final_model_weights.h5"),
-                    os.path.join(Config.MODEL_PATH, "best_model_weights.h5"),
-                    os.path.join(Config.MODEL_PATH, "final_model_weights.hdf5"),
-                ]
-                for c in candidates:
-                    if os.path.exists(c):
-                        model.load_weights(c)
-                        loaded_weights = c
-                        break
-            if loaded_weights is None:
-                # try loading the path directly (may be .h5 or checkpoint)
-                try:
-                    model.load_weights(Config.MODEL_PATH)
-                    loaded_weights = Config.MODEL_PATH
-                except Exception:
-                    pass
-
-            if loaded_weights:
-                print(f"  Weights loaded from: {loaded_weights}")
-            else:
-                print("  WARNING: No matching weights file found inside the given model path.")
-                print("  Please point --model to a SavedModel folder or a .h5 weights file.")
-        except Exception as e2:
-            print("  Fallback failed:", str(e2))
-            print("  Cannot load model. Abbruch.")
-            sys.exit(1)
-
-    if model is None:
-        print("  ERROR: Model object is None after loading attempts.")
-        sys.exit(1)
-
+    print(f"\nLoading model …")
+    model = tf.keras.models.load_model(Config.MODEL_PATH, compile=False)
     print(f"  Input:  {model.input_shape}")
     print(f"  Output: {model.output_shape}")
-    print(f"\nLoading model …")
 
     # ------------------------------------------------------------------
     # 2. Normalisierungs-Stats laden
@@ -455,8 +442,6 @@ def main():
         for f in os.listdir(Config.TEST_MASK_PATH) if f.endswith(".npy")
     ])
 
-    if len(img_files) != len(mask_files):
-        raise ValueError(f"Bild/Masken-Mismatch: {len(img_files)} vs {len(mask_files)}")
     if len(img_files) != len(mask_files):
         raise ValueError(f"Image/mask mismatch: {len(img_files)} vs {len(mask_files)}")
 

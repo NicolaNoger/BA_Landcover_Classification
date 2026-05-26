@@ -34,8 +34,16 @@ from datetime import datetime
 PROJECT_ROOT    = "A:/STUDIUM/06_Fruelingssemester26/BA"
 DATA_PATH       = os.path.join(PROJECT_ROOT, "data", "processed", "training_data")
 
+# Standard label-correction queue (generate_queue.py output)
 QUEUE_FILE      = os.path.join(DATA_PATH, "label_review", "review_queue.json")
 REVIEWS_FILE    = os.path.join(DATA_PATH, "label_review", "reviews_log.json")
+
+# IC class-audit queue (generate_ic_queue.py output)
+IC_QUEUE_FILE   = os.path.join(DATA_PATH, "ic_review", "ic_review_queue.json")
+IC_REVIEWS_FILE = os.path.join(DATA_PATH, "ic_review", "ic_reviews_log.json")
+
+# Set ACTIVE_QUEUE to either QUEUE_FILE or IC_QUEUE_FILE depending on what you want to review.
+ACTIVE_QUEUE    = IC_QUEUE_FILE   # change to QUEUE_FILE for standard review
 
 
 def find_fallback_file(filename: str) -> str | None:
@@ -50,14 +58,17 @@ def find_fallback_file(filename: str) -> str | None:
     return None
 
 
-# Resolve possible alternate locations (if generate_queue.py was run from another cwd)
-resolved_queue = find_fallback_file(QUEUE_FILE)
+# Resolve active queue and matching reviews log
+resolved_queue = find_fallback_file(ACTIVE_QUEUE)
 if resolved_queue:
     QUEUE_FILE = resolved_queue
+else:
+    QUEUE_FILE = ACTIVE_QUEUE
 
-resolved_reviews = find_fallback_file(REVIEWS_FILE)
-if resolved_reviews:
-    REVIEWS_FILE = resolved_reviews
+REVIEWS_FILE = os.path.join(
+    os.path.dirname(QUEUE_FILE),
+    "reviews_log.json",
+)
 
 # Original-Masken (nur lesen!)
 ORIGINAL_MASK_DIR = os.path.join(DATA_PATH, "test", "mask_snippets")
@@ -110,11 +121,21 @@ def load_queue(queue_file: str) -> list:
         queue = json.load(f)
 
     # If queue entries reference remote/HPC absolute paths, try to remap to
-    # locally copied files. Priority: overlays/ > test/img_snippets/ > test/mask_snippets/
-    base_dir = os.path.join(DATA_PATH, "label_review")
-    overlays_dir = os.path.join(base_dir, "overlays")
+    # locally copied files. Priority: queue_dir/overlays > test/img_snippets > test/mask_snippets > ...
+    queue_dir = os.path.dirname(queue_file)
+    queue_overlays_dir = os.path.join(queue_dir, "overlays")
+    
+    # Fallback overlay dirs (label_review and ic_review)
+    label_review_dir = os.path.join(DATA_PATH, "label_review")
+    label_overlays_dir = os.path.join(label_review_dir, "overlays")
+    ic_review_dir = os.path.join(DATA_PATH, "ic_review")
+    ic_overlays_dir = os.path.join(ic_review_dir, "overlays")
+    
+    # Snippet directories (test and train)
     img_snippets_dir = os.path.join(DATA_PATH, "test", "img_snippets")
     mask_snippets_dir = os.path.join(DATA_PATH, "test", "mask_snippets")
+    img_snippets_dir_train = os.path.join(DATA_PATH, "train", "img_snippets")
+    mask_snippets_dir_train = os.path.join(DATA_PATH, "train", "mask_snippets")
 
     for item in queue:
         for key in ("overlay_rgb_path", "overlay_gt_path", "overlay_pred_path",
@@ -128,10 +149,16 @@ def load_queue(queue_file: str) -> list:
             # try remapping by basename
             basename = os.path.basename(p)
             candidates = [
-                os.path.join(overlays_dir, basename),
+                os.path.join(queue_overlays_dir, basename),
+                os.path.join(label_overlays_dir, basename),
+                os.path.join(ic_overlays_dir, basename),
                 os.path.join(img_snippets_dir, basename),
                 os.path.join(mask_snippets_dir, basename),
-                os.path.join(base_dir, basename),
+                os.path.join(img_snippets_dir_train, basename),
+                os.path.join(mask_snippets_dir_train, basename),
+                os.path.join(queue_dir, basename),
+                os.path.join(label_review_dir, basename),
+                os.path.join(ic_review_dir, basename),
             ]
             for candidate in candidates:
                 if os.path.exists(candidate):
@@ -186,13 +213,26 @@ def load_mask_for_snippet(snippet_name: str, mask_npy_path: str) -> np.ndarray |
     Priority: clean directory -> original.
     Returns (H, W) uint8 array (values 1-8) or None if missing.
     """
-    clean_path = os.path.join(CLEAN_MASK_DIR, os.path.basename(mask_npy_path))
+    # Derive a per-snippet clean directory next to the mask_snippets folder
+    try:
+        parent = os.path.dirname(mask_npy_path)  # .../train/mask_snippets
+        grandparent = os.path.dirname(parent)   # .../train
+        derived_clean_dir = os.path.join(grandparent, "mask_snippets_clean")
+        clean_path = os.path.join(derived_clean_dir, os.path.basename(mask_npy_path))
+    except Exception:
+        clean_path = os.path.join(CLEAN_MASK_DIR, os.path.basename(mask_npy_path))
+
+    # Try derived clean path first, then global clean dir, then original path
     if os.path.exists(clean_path):
         arr = np.load(clean_path, allow_pickle=False)
-    elif os.path.exists(mask_npy_path):
-        arr = np.load(mask_npy_path, allow_pickle=False)
     else:
-        return None
+        global_clean_candidate = os.path.join(CLEAN_MASK_DIR, os.path.basename(mask_npy_path))
+        if os.path.exists(global_clean_candidate):
+            arr = np.load(global_clean_candidate, allow_pickle=False)
+        elif os.path.exists(mask_npy_path):
+            arr = np.load(mask_npy_path, allow_pickle=False)
+        else:
+            return None
 
     if arr.ndim == 3:
         arr = arr[:, :, 0]
@@ -207,7 +247,11 @@ def patch_and_save_mask(
     """Patch mask pixels inside blob to predicted class id and save
     resulting mask into CLEAN_MASK_DIR. Returns True on success."""
     try:
-        os.makedirs(CLEAN_MASK_DIR, exist_ok=True)
+        # Determine clean directory relative to mask_npy_path (train vs test)
+        parent = os.path.dirname(mask_npy_path)
+        grandparent = os.path.dirname(parent)
+        derived_clean_dir = os.path.join(grandparent, "mask_snippets_clean")
+        os.makedirs(derived_clean_dir, exist_ok=True)
 
         # Maske laden (clean > original)
         mask = load_mask_for_snippet(
@@ -224,8 +268,8 @@ def patch_and_save_mask(
         # Patch anwenden
         mask[blob] = np.uint8(pred_class_id)
 
-        # In clean-Verzeichnis speichern (mit korrekter Form HxWx1)
-        clean_path = os.path.join(CLEAN_MASK_DIR, os.path.basename(mask_npy_path))
+        # In derived clean-Verzeichnis speichern (mit korrekter Form HxWx1)
+        clean_path = os.path.join(derived_clean_dir, os.path.basename(mask_npy_path))
         np.save(clean_path, mask[:, :, np.newaxis])
         return True
 
@@ -405,12 +449,12 @@ def main():
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Restart", use_container_width=True):
+            if st.button("Restart", width='stretch'):
                 st.session_state.current_index = 0
                 st.rerun()
         with col2:
             # Export: show reviews as JSON
-            if st.button("Show reviews (JSON)", use_container_width=True):
+            if st.button("Show reviews (JSON)", width='stretch'):
                 st.json(reviews)
         st.stop()
 
@@ -456,11 +500,11 @@ def main():
         
         col_rgb, col_gt_img, col_pred_img = st.columns(3)
         with col_rgb:
-            st.image(rgb_img or placeholder, caption="RGB", use_container_width=True)
+                st.image(rgb_img or placeholder, caption="RGB", width='stretch')
         with col_gt_img:
-            st.image(gt_img or placeholder, caption=f"Label: {item['label_class_name']}", use_container_width=True)
+                st.image(gt_img or placeholder, caption=f"Label: {item['label_class_name']}", width='stretch')
         with col_pred_img:
-            st.image(pred_img or placeholder, caption=f"Pred: {item['pred_class_name']}\n({item['confidence_mean']:.0%})", use_container_width=True)
+                st.image(pred_img or placeholder, caption=f"Pred: {item['pred_class_name']}\n({item['confidence_mean']:.0%})", width='stretch')
     
     with col_legend:
         st.markdown(class_legend_html(), unsafe_allow_html=True)
@@ -498,7 +542,7 @@ def main():
     with col_b1:
         if st.button(
             f"✓ Accept\n{item['pred_class_name']}",
-            use_container_width=True, key="btn_accept",
+            width='stretch', key="btn_accept",
             type="primary",
             help="Set blob pixels to model prediction",
         ):
@@ -507,7 +551,7 @@ def main():
     with col_b2:
         if st.button(
             f"✓ Keep\n{item['label_class_name']}",
-            use_container_width=True, key="btn_keep",
+            width='stretch', key="btn_keep",
             help="Label is correct, no change",
         ):
             decide("keep_label")
@@ -515,7 +559,7 @@ def main():
     with col_b3:
         if st.button(
             "✗ Both\nManual needed",
-            use_container_width=True, key="btn_both",
+            width='stretch', key="btn_both",
             help="Neither is correct",
         ):
             decide("both_wrong")
@@ -523,7 +567,7 @@ def main():
     with col_b4:
         if st.button(
             "⏭ Skip\nLater",
-            use_container_width=True, key="btn_skip",
+            width='stretch', key="btn_skip",
             help="Decide later",
         ):
             decide("skipped")
