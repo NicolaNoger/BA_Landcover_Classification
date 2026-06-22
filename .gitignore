@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 .venv/
 .BA_local/
 __pycache__/
@@ -18,3 +18,5 @@ lightning_logs/
 /archive/
 *.qgz
 /testing/
+/.quarto/
+**/*.quarto_ipynb

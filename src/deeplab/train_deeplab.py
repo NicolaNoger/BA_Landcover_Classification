@@ -78,8 +78,20 @@ class Config:
     FOCAL_GAMMA = 2.0      
     FOCAL_ALPHA = [1.41, 0.78, 0.78, 4.0, 0.69, 0.90, 0.30, 9.17]  
     
-    LOAD_CHECKPOINT = None
-    RESUME_TRAINING = False  
+    # Checkpoint Loading & Fine-tuning
+    # LOAD_CHECKPOINT can be:
+    #   - None (train from scratch)
+    #   - Path to SavedModel folder (e.g., "deeplab_20260511_115648/final_model")
+    #   - Path to weights file (.h5 or TF checkpoint)
+    LOAD_CHECKPOINT = "/cfs/earth/scratch/nogernic/BA_2026/models/deeplab_20260511_115648"
+    RESUME_TRAINING = False  # False = Fine-tuning mode (freeze backbone), True = Resume (all trainable)
+    
+    # Fine-tuning learning rate (typically 1/10 of training LR)
+    FINETUNE_LEARNING_RATE = 1e-5
+    
+    # Fine-tuning parameters
+    FREEZE_BACKBONE_EPOCHS = 5  # Epochs to freeze ResNet50 backbone during fine-tuning
+    UNFREEZE_AT_EPOCH = 6       # After this epoch, unfreeze all layers for full training
 
     # Visualization
     VIZ_RGB_CHANNELS = (1, 2, 3)
@@ -100,6 +112,98 @@ def create_output_directory():
     output_dir = os.path.join(Config.OUTPUT_DIR, f"deeplab_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
+
+
+# =============================================================================
+# FINE-TUNING HELPER FUNCTIONS
+# =============================================================================
+
+def _freeze_backbone(model):
+    """
+    Freezes backbone layers (ResNet50 encoder) for fine-tuning.
+    Keeps only decoder and output head trainable.
+    
+    Returns:
+        tuple: (frozen_count, trainable_count)
+    """
+    frozen_count = 0
+    trainable_count = 0
+    
+    # Debug: print all layer names to see what we're working with
+    print("\n  DEBUG: Layer names in model:")
+    for i, layer in enumerate(model.layers[:10]):  # Show first 10 for debugging
+        print(f"    {i}: {layer.name}")
+    if len(model.layers) > 10:
+        print(f"    ... and {len(model.layers) - 10} more layers")
+    
+    for layer in model.layers:
+        # Common backbone names in DeepLabV3+
+        layer_name_lower = layer.name.lower()
+        
+        # More specific matching for DeepLabV3+
+        is_backbone = any(name in layer_name_lower for name in 
+                         ['resnet', 'encoder', 'backbone', 'mobilenet', 'efficientnet', 
+                          'conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4'])
+        
+        # Skip if it's clearly not a backbone component
+        is_decoder_or_head = any(skip in layer_name_lower for skip in 
+                                ['decoder', 'head', 'output', 'logits', 'predictions', 'aspp', 'psp'])
+        
+        if is_backbone and not is_decoder_or_head:
+            layer.trainable = False
+            frozen_count += 1
+        else:
+            layer.trainable = True
+            trainable_count += 1
+    
+    if frozen_count == 0:
+        print(" WARNING: No backbone layers matched! Check layer names.")
+        print("  → All layers will be trainable (no freezing)")
+    
+    return frozen_count, trainable_count
+
+
+def _unfreeze_all_layers(model):
+    """
+    Unfreezes all layers for full fine-tuning after initial epochs.
+    
+    Returns:
+        int: Number of layers unfrozen
+    """
+    count = 0
+    for layer in model.layers:
+        if not layer.trainable:
+            layer.trainable = True
+            count += 1
+    return count
+
+
+class UnfreezeBackboneCallback(tf.keras.callbacks.Callback):
+    """
+    Callback that unfreezes backbone layers at a specified epoch.
+    Used for two-stage fine-tuning: first stage freezes backbone,
+    second stage unfreezes all layers.
+    """
+    def __init__(self, unfreeze_at_epoch: int):
+        super().__init__()
+        self.unfreeze_at_epoch = unfreeze_at_epoch
+        self.unfrozen = False
+    
+    def on_epoch_begin(self, epoch, logs=None):
+        if epoch == self.unfreeze_at_epoch and not self.unfrozen:
+            print(f"\n{'='*70}")
+            print(f"UNFREEZING BACKBONE AT EPOCH {epoch + 1}")
+            print(f"{'='*70}")
+            print("Switching from frozen backbone to full fine-tuning...")
+            
+            unfrozen = _unfreeze_all_layers(self.model)
+            print(f"Unfroze {unfrozen} layers")
+            
+            # Recompile with potentially adjusted learning rate
+            current_lr = tf.keras.backend.get_value(self.model.optimizer.learning_rate)
+            print(f"Keeping learning rate: {current_lr}")
+            
+            self.unfrozen = True
 
 
 def load_data():
@@ -200,6 +304,70 @@ def focal_loss(gamma=2.0, alpha=0.25):
     return focal_loss_fixed
 
 
+# =============================================================================
+# CUSTOM METRICS (defined globally for serialization compatibility)
+# =============================================================================
+
+class ArgmaxMeanIoU(tf.keras.metrics.MeanIoU):
+    """Mean IoU metric that handles one-hot encoded predictions and targets."""
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        return super().update_state(tf.argmax(y_true, -1), tf.argmax(y_pred, -1), sample_weight)
+
+
+class ArgmaxAccuracy(tf.keras.metrics.Metric):
+    """Custom accuracy metric that converts one-hot to class indices."""
+    def __init__(self, name='accuracy', **kwargs):
+        super().__init__(name=name, **kwargs)
+        self._correct = self.add_weight(name='correct', initializer='zeros')
+        self._total   = self.add_weight(name='total',   initializer='zeros')
+    
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        match = tf.equal(tf.argmax(y_pred, -1), tf.argmax(y_true, -1))
+        self._correct.assign_add(tf.reduce_sum(tf.cast(match, tf.float32)))
+        self._total.assign_add(tf.cast(tf.size(tf.argmax(y_true, -1)), tf.float32))
+    
+    def result(self):
+        return self._correct / (self._total + tf.keras.backend.epsilon())
+    
+    def reset_state(self):
+        self._correct.assign(0.0)
+        self._total.assign(0.0)
+
+
+def _freeze_backbone(model):
+    """
+    Freezes backbone layers (ResNet50 encoder) for fine-tuning.
+    Keeps only decoder and output head trainable.
+    """
+    frozen_count = 0
+    trainable_count = 0
+    
+    for layer in model.layers:
+        # Common backbone names in DeepLabV3+: resnet, encoder, backbone
+        layer_name_lower = layer.name.lower()
+        is_backbone = any(name in layer_name_lower for name in 
+                         ['resnet', 'encoder', 'backbone', 'mobilenet', 'efficientnet'])
+        
+        if is_backbone and not any(skip in layer_name_lower for skip in 
+                                   ['decoder', 'head', 'output', 'logits', 'predictions']):
+            layer.trainable = False
+            frozen_count += 1
+        else:
+            layer.trainable = True
+            trainable_count += 1
+    
+    return frozen_count, trainable_count
+
+
+def _unfreeze_all_layers(model):
+    """
+    Unfreezes all layers for full fine-tuning after initial epochs.
+    """
+    for layer in model.layers:
+        layer.trainable = True
+    return len(model.layers)
+
+
 def build_model():
     print("\n" + "="*70)
     print("STEP 2: BUILD MODEL")
@@ -223,26 +391,17 @@ def build_model():
         loss_fn = 'categorical_crossentropy'
         print("Loss: Categorical Crossentropy")
 
-    class ArgmaxMeanIoU(tf.keras.metrics.MeanIoU):
-        def update_state(self, y_true, y_pred, sample_weight=None):
-            return super().update_state(tf.argmax(y_true, -1), tf.argmax(y_pred, -1), sample_weight)
-
-    class ArgmaxAccuracy(tf.keras.metrics.Metric):
-        def __init__(self, **kwargs):
-            super().__init__(name='accuracy', **kwargs)
-            self._correct = self.add_weight(name='correct', initializer='zeros')
-            self._total   = self.add_weight(name='total',   initializer='zeros')
-        def update_state(self, y_true, y_pred, sample_weight=None):
-            match = tf.equal(tf.argmax(y_pred, -1), tf.argmax(y_true, -1))
-            self._correct.assign_add(tf.reduce_sum(tf.cast(match, tf.float32)))
-            self._total.assign_add(tf.cast(tf.size(tf.argmax(y_true, -1)), tf.float32))
-        def result(self):
-            return self._correct / (self._total + tf.keras.backend.epsilon())
-        def reset_state(self):
-            self._correct.assign(0.0)
-            self._total.assign(0.0)
-
-    optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=Config.LEARNING_RATE, clipvalue=1.0)
+    # Determine initial learning rate based on mode
+    if Config.LOAD_CHECKPOINT and not Config.RESUME_TRAINING:
+        # Fine-tuning mode: use lower learning rate
+        initial_lr = Config.FINETUNE_LEARNING_RATE
+        print(f"  Mode: FINE-TUNING (using reduced LR: {initial_lr})")
+    else:
+        # Training from scratch or resuming
+        initial_lr = Config.LEARNING_RATE
+        print(f"  Mode: {'RESUME TRAINING' if Config.RESUME_TRAINING else 'TRAINING FROM SCRATCH'} (LR: {initial_lr})")
+    
+    optimizer = tf.keras.optimizers.legacy.Adam(learning_rate=initial_lr, clipvalue=1.0)
     model.compile(
         optimizer=optimizer,
         loss=loss_fn,
@@ -255,13 +414,64 @@ def build_model():
 
     if Config.LOAD_CHECKPOINT:
         print("\n" + "-" * 70)
-        print("LOADING CHECKPOINT")
+        print("LOADING CHECKPOINT FOR FINE-TUNING")
         print("-" * 70)
         try:
-            model.load_weights(Config.LOAD_CHECKPOINT)
-            print(f"Loaded weights from: {Config.LOAD_CHECKPOINT}")
+            checkpoint_path = Config.LOAD_CHECKPOINT
+            
+            # Try to load weights from various formats
+            # (We rebuild the model architecture via build_deeplabv3plus, so we only need weights)
+            if os.path.isdir(checkpoint_path):
+                # SavedModel format - try loading the inner weights file
+                weights_candidates = [
+                    os.path.join(checkpoint_path, "final_model", "variables"),  # Keras SavedModel
+                    os.path.join(checkpoint_path, "best_model_weights", "checkpoint"),  # Our format
+                    checkpoint_path,  # Try direct loading
+                ]
+                loaded = False
+                for weights_path in weights_candidates:
+                    if os.path.exists(weights_path) or weights_path == checkpoint_path:
+                        try:
+                            print(f"Attempting to load weights from: {weights_path}")
+                            model.load_weights(weights_path)
+                            loaded = True
+                            break
+                        except Exception as e:
+                            print(f"  ✗ Failed: {str(e)[:80]}")
+                            continue
+                if not loaded:
+                    print(f"⚠  WARNING: Could not load weights from {checkpoint_path}")
+                    print(f"  Available candidates: {weights_candidates}")
+                    print(f"  → Training from scratch instead\n")
+            else:
+                # Weights file (.h5, .weights, or TF checkpoint format)
+                print(f"Loading weights from: {checkpoint_path}")
+                try:
+                    model.load_weights(checkpoint_path)
+                except Exception as e:
+                    print(f"⚠  WARNING: Could not load weights: {str(e)[:100]}")
+                    print(f"  → Training from scratch instead\n")
+            
+            if loaded or not os.path.isdir(checkpoint_path):
+                print(f"✓ Successfully loaded checkpoint")
+                
+                if Config.RESUME_TRAINING:
+                    print("  Mode: RESUME TRAINING")
+                    print("  → All layers trainable (continue training)")
+                    print("  → Optimizer state NOT restored (starts fresh)\n")
+                else:
+                    print("  Mode: FINE-TUNING")
+                    print(f"  → Freeze backbone for {Config.FREEZE_BACKBONE_EPOCHS} epochs")
+                    print(f"  → Unfreeze all layers at epoch {Config.UNFREEZE_AT_EPOCH}\n")
+                    # Freeze backbone layers for fine-tuning
+                    frozen_count, trainable_count = _freeze_backbone(model)
+                    print(f"  ✓ Backbone frozen: {frozen_count} layers")
+                    print(f"  ✓ Decoder/head trainable: {trainable_count} layers\n")
         except Exception as e:
             print(f"ERROR: Could not load checkpoint: {e}")
+            print("  Starting training from scratch instead")
+            import traceback
+            traceback.print_exc()
     
     return model
 
@@ -845,6 +1055,17 @@ def setup_callbacks(output_dir, val_batches=None):
         print(
             f"EpochVisualizationCallback: saves prediction PNGs every "
             f"{Config.EPOCH_VIZ_INTERVAL} epochs → epoch_samples/"
+        )
+
+    # 8. UnfreezeBackboneCallback – for two-stage fine-tuning
+    if Config.LOAD_CHECKPOINT and not Config.RESUME_TRAINING:
+        unfreeze_cb = UnfreezeBackboneCallback(
+            unfreeze_at_epoch=Config.UNFREEZE_AT_EPOCH - 1  # 0-based index
+        )
+        callbacks.append(unfreeze_cb)
+        print(
+            f"UnfreezeBackboneCallback: unfreezes backbone at epoch "
+            f"{Config.UNFREEZE_AT_EPOCH} for full fine-tuning"
         )
 
     return callbacks

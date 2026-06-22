@@ -34,41 +34,9 @@ from datetime import datetime
 PROJECT_ROOT    = "A:/STUDIUM/06_Fruelingssemester26/BA"
 DATA_PATH       = os.path.join(PROJECT_ROOT, "data", "processed", "training_data")
 
-# Standard label-correction queue (generate_queue.py output)
+# Label-correction queue (generate_queue.py output)
 QUEUE_FILE      = os.path.join(DATA_PATH, "label_review", "review_queue.json")
 REVIEWS_FILE    = os.path.join(DATA_PATH, "label_review", "reviews_log.json")
-
-# IC class-audit queue (generate_ic_queue.py output)
-IC_QUEUE_FILE   = os.path.join(DATA_PATH, "ic_review", "ic_review_queue.json")
-IC_REVIEWS_FILE = os.path.join(DATA_PATH, "ic_review", "ic_reviews_log.json")
-
-# Set ACTIVE_QUEUE to either QUEUE_FILE or IC_QUEUE_FILE depending on what you want to review.
-ACTIVE_QUEUE    = IC_QUEUE_FILE   # change to QUEUE_FILE for standard review
-
-
-def find_fallback_file(filename: str) -> str | None:
-    """Search workspace for a filename fallback and return first match."""
-    # First check absolute path as-is
-    if os.path.exists(filename):
-        return filename
-    # Walk project root for fallback
-    for root, dirs, files in os.walk(PROJECT_ROOT):
-        if os.path.basename(filename) in files:
-            return os.path.join(root, os.path.basename(filename))
-    return None
-
-
-# Resolve active queue and matching reviews log
-resolved_queue = find_fallback_file(ACTIVE_QUEUE)
-if resolved_queue:
-    QUEUE_FILE = resolved_queue
-else:
-    QUEUE_FILE = ACTIVE_QUEUE
-
-REVIEWS_FILE = os.path.join(
-    os.path.dirname(QUEUE_FILE),
-    "reviews_log.json",
-)
 
 # Original-Masken (nur lesen!)
 ORIGINAL_MASK_DIR = os.path.join(DATA_PATH, "test", "mask_snippets")
@@ -125,11 +93,9 @@ def load_queue(queue_file: str) -> list:
     queue_dir = os.path.dirname(queue_file)
     queue_overlays_dir = os.path.join(queue_dir, "overlays")
     
-    # Fallback overlay dirs (label_review and ic_review)
+    # Fallback overlay dir (label_review)
     label_review_dir = os.path.join(DATA_PATH, "label_review")
     label_overlays_dir = os.path.join(label_review_dir, "overlays")
-    ic_review_dir = os.path.join(DATA_PATH, "ic_review")
-    ic_overlays_dir = os.path.join(ic_review_dir, "overlays")
     
     # Snippet directories (test and train)
     img_snippets_dir = os.path.join(DATA_PATH, "test", "img_snippets")
@@ -151,14 +117,12 @@ def load_queue(queue_file: str) -> list:
             candidates = [
                 os.path.join(queue_overlays_dir, basename),
                 os.path.join(label_overlays_dir, basename),
-                os.path.join(ic_overlays_dir, basename),
                 os.path.join(img_snippets_dir, basename),
                 os.path.join(mask_snippets_dir, basename),
                 os.path.join(img_snippets_dir_train, basename),
                 os.path.join(mask_snippets_dir_train, basename),
                 os.path.join(queue_dir, basename),
                 os.path.join(label_review_dir, basename),
-                os.path.join(ic_review_dir, basename),
             ]
             for candidate in candidates:
                 if os.path.exists(candidate):
