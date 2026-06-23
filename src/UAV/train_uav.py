@@ -1,18 +1,28 @@
 """
-Training script for DeepLabV3+ land cover segmentation.
+Training script for the UAV cascade stage (DeepLabV3+).
 
-Two modes, controlled by Config.LOAD_CHECKPOINT:
-    - None:   train from scratch.
-    - a path: load weights from a previous run and continue training.
+This is the UAV counterpart of src/deeplab/train_deeplab.py. The training
+methodology is IDENTICAL — focal loss (class-weighted alpha), mixed precision,
+legacy Adam with gradient clipping, ReduceLROnPlateau, EarlyStopping, on-the-fly
+z-score normalization and D4 augmentation, 85/15 train/val split, and the same
+per-class IoU / confusion-matrix evaluation.
 
-Metrics:
-    - Per-epoch loss, pixel accuracy and mean IoU are logged to
-      training_history.csv (via the compiled metrics + CSVLogger).
-    - Per-class IoU is tracked each epoch by a confusion-matrix callback,
-      because it exposes class-level trends that a single mean IoU hides.
-    - The final test evaluation reports per-class IoU / precision / recall,
-      a per-class classification report, a confusion matrix and macro /
-      weighted F1, and saves all of them to disk.
+Only dimension-related settings differ from the aerial run:
+    - INPUT_SHAPE (1024, 1024, C), C set by USE_COARSE:
+        * 12  [R, G, B, nDSM + 8 one-hot coarse-context]  (full cascade)
+        * 4   [R, G, B, nDSM]                              (no-coarse ablation)
+    - BATCH_SIZE 4                   (1024^2 x 12ch is ~16x the aerial sample size)
+    - image_to_rgb reads channels 0..2 (UAV R, G, B) for previews
+    - paths point at the UAV training data
+
+The USE_COARSE flag drives the cascade vs. RGB+nDSM ablation: both variants read
+the same on-disk tiles and the same train/test split, so the only difference is
+whether the coarse semantic context is fed to the model.
+
+The class taxonomy below (NUM_CLASSES, CLASS_NAMES, FOCAL_ALPHA, CLASS_COLORS) is
+the refined 12-class UAV taxonomy (the target labels). This is independent of the
+8-class coarse-context channel, which carries the aerial stage's taxonomy: the
+cascade refines a coarse 8-class context into the finer 12-class UAV prediction.
 """
 
 import gc
@@ -29,7 +39,7 @@ from dataloader import load_npy_dataset, prepare_dataset
 
 class Config:
     PROJECT_ROOT = "/cfs/earth/scratch/nogernic/BA_2026"
-    DATA_PATH = os.path.join(PROJECT_ROOT, "data", "training_data")
+    DATA_PATH = os.path.join(PROJECT_ROOT, "data", "uav_training_data")
 
     TRAIN_IMG_PATH = os.path.join(DATA_PATH, "train", "img_snippets")
     TRAIN_MASK_PATH = os.path.join(DATA_PATH, "train", "mask_snippets")
@@ -38,21 +48,28 @@ class Config:
     NORM_STATS_PATH = os.path.join(DATA_PATH, "normalization_stats.json")
     OUTPUT_DIR = os.path.join(PROJECT_ROOT, "models")
 
-    NUM_CLASSES = 8
+    NUM_CLASSES = 12
     CLASS_NAMES = [
-        "Building", "Impervious_Surface", "Cropland", "Intensive_Culture",
-        "Grassland_Garden", "Tree_Canopy", "Water", "Railway",
+        "Building", "Greenhouse", "Street", "Car",
+        "Pavement", "Trees", "Hedge", "Bush",
+        "Garden", "Gravel", "Acre", "Mowed_Grass",
     ]
 
-    INPUT_SHAPE = (512, 512, 7)
+    # Cascade ablation switch. True: feed the coarse-context channels (4 continuous
+    # + 8 one-hot = 12 ch). False: RGB + nDSM only (4 ch), no coarse support.
+    # Both variants read the same on-disk tiles, so the comparison is controlled.
+    USE_COARSE = True
+
+    # UAV stage: 1024x1024 tiles. Channel count follows USE_COARSE.
+    INPUT_SHAPE = (1024, 1024, 12 if USE_COARSE else 4)
     TRAIN_RATIO = 0.85
 
-    BATCH_SIZE = 16
+    BATCH_SIZE = 4          # 1024^2 x 12 channels is ~16x the aerial sample size
     EPOCHS = 50
     LEARNING_RATE = 1e-4
 
     FOCAL_GAMMA = 2.0
-    FOCAL_ALPHA = [1.41, 0.78, 0.78, 4.0, 0.69, 0.90, 0.30, 9.17]
+    FOCAL_ALPHA = [1.0] * NUM_CLASSES  # per-class focal loss weights
 
     # Set to a weights path (e.g. ".../best_model_ckpt") to continue
     # training from a previous run. Leave as None to train from scratch.
@@ -152,7 +169,7 @@ class PerClassIoUCallback(tf.keras.callbacks.Callback):
     enough to run every epoch while still tracking class-level trends.
     """
 
-    def __init__(self, val_dataset, output_dir, num_classes, class_names, num_batches=30):
+    def __init__(self, val_dataset, output_dir, num_classes, class_names, num_batches=10):
         super().__init__()
         images, true_labels = [], []
         for imgs, masks in val_dataset.take(num_batches):
@@ -202,11 +219,11 @@ class PerClassIoUCallback(tf.keras.callbacks.Callback):
 def load_data():
     train_pool = load_npy_dataset(
         Config.TRAIN_IMG_PATH, Config.TRAIN_MASK_PATH, Config.NORM_STATS_PATH,
-        num_channels=Config.INPUT_SHAPE[-1],
+        use_coarse=Config.USE_COARSE,
     )
     test_set = load_npy_dataset(
         Config.TEST_IMG_PATH, Config.TEST_MASK_PATH, Config.NORM_STATS_PATH,
-        num_channels=Config.INPUT_SHAPE[-1],
+        use_coarse=Config.USE_COARSE,
     )
 
     n_total = train_pool.cardinality().numpy()
@@ -342,7 +359,7 @@ def compute_pixel_distribution(mask_dir, class_names, output_dir, sample_size=50
             counts[c] += np.sum(mask == c)
 
     total = counts.sum()
-    proportions = counts / total
+    proportions = counts / max(total, 1)
 
     csv_path = os.path.join(output_dir, "pixel_distribution.csv")
     with open(csv_path, "w") as f:
@@ -380,17 +397,23 @@ def save_prediction_samples(model, test_batches, output_dir, num_samples=3):
     print(f"Saved {saved} prediction sample(s) to {samples_dir}")
 
 
-# RGB palette for the 8 classes (0-based), used to colorize masks in previews.
-# These are the exact "tab10" RGB values, matching the project-wide plot palette.
+# 12-class UAV palette (0-based). The first 8 entries are the tab10 colors used by
+# evaluate.py / train_deeplab.py (so Building stays blue, Trees brown, etc.), and
+# four further distinct colors cover the refined UAV-only classes 9-12. The same
+# array is mirrored in compare_models.py so every UAV figure shares these colors.
 CLASS_COLORS = np.array([
-    [ 31, 119, 180],   # Building
-    [255, 127,  14],   # Impervious_Surface
-    [ 44, 160,  44],   # Cropland
-    [214,  39,  40],   # Intensive_Culture
-    [148, 103, 189],   # Grassland_Garden
-    [140,  86,  75],   # Tree_Canopy
-    [227, 119, 194],   # Water
-    [127, 127, 127],   # Railway
+    [ 31, 119, 180],   # 1  Building
+    [255, 127,  14],   # 2  Greenhouse
+    [ 44, 160,  44],   # 3  Street
+    [214,  39,  40],   # 4  Car
+    [148, 103, 189],   # 5  Pavement
+    [140,  86,  75],   # 6  Trees
+    [227, 119, 194],   # 7  Hedge
+    [127, 127, 127],   # 8  Bush
+    [188, 189,  34],   # 9  Garden
+    [ 23, 190, 207],   # 10 Gravel
+    [255, 215,   0],   # 11 Acre
+    [  0, 128, 128],   # 12 Mowed_Grass
 ], dtype=np.uint8)
 
 
@@ -400,9 +423,9 @@ def label_to_rgb(label_map):
 
 
 def image_to_rgb(image):
-    """Builds a contrast-stretched uint8 RGB image from channels 1,2,3 (R,G,B),
-    using a per-channel 2-98 percentile stretch. NaN-safe."""
-    rgb = np.nan_to_num(np.asarray(image[:, :, 1:4], dtype=np.float32))
+    """Builds a contrast-stretched uint8 RGB image from the UAV R, G, B channels
+    (indices 0, 1, 2), using a per-channel 2-98 percentile stretch. NaN-safe."""
+    rgb = np.nan_to_num(np.asarray(image[:, :, 0:3], dtype=np.float32))
     out = np.zeros(rgb.shape, dtype=np.uint8)
     for c in range(3):
         p2, p98 = np.percentile(rgb[:, :, c], (2, 98))
@@ -459,7 +482,10 @@ class EpochVisualizationCallback(tf.keras.callbacks.Callback):
 def main():
     enable_mixed_precision()
 
-    output_dir = os.path.join(Config.OUTPUT_DIR, f"deeplab_{datetime.now():%Y%m%d_%H%M%S}")
+    variant = "coarse" if Config.USE_COARSE else "rgbndsm"
+    output_dir = os.path.join(
+        Config.OUTPUT_DIR, f"uav_deeplab_{variant}_{datetime.now():%Y%m%d_%H%M%S}"
+    )
     os.makedirs(output_dir, exist_ok=True)
 
     compute_pixel_distribution(Config.TRAIN_MASK_PATH, Config.CLASS_NAMES, output_dir)

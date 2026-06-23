@@ -103,10 +103,14 @@ CLASS_COLORS = np.array([
     [130, 60,  180],  # 8: Railway
 ], dtype=np.uint8)
 
-BLOB_HIGHLIGHT_COLOR = (255, 220, 0)   # Yellow border color (for all three panels)
-BLOB_FILL_ALPHA_MASK = 0.20            # Light fill for GT / pred mask panels
-BLOB_FILL_ALPHA_RGB  = 0.0             # No fill on RGB – keep image readable
-BLOB_BORDER_ITERS    = 1               # Thin 1-px border (was 3)
+# Border and fill use DIFFERENT colors, neither of which is a class color, so
+# at least one is always clearly visible — even when the blob lies over the
+# yellow Cropland class (where a yellow highlight used to disappear).
+BLOB_BORDER_COLOR    = (255, 0, 255)   # magenta, thick outline (all three panels)
+BLOB_FILL_COLOR      = (0, 255, 255)   # cyan fill (mask panels only)
+BLOB_FILL_ALPHA_MASK = 0.30            # fill strength on GT / pred mask panels
+BLOB_FILL_ALPHA_RGB  = 0.0             # no fill on RGB – keep image readable
+BLOB_BORDER_ITERS    = 4               # thick ~4-px outline (was 1)
 
 
 def cname(class_id_1based: int) -> str:
@@ -154,31 +158,31 @@ def apply_blob_highlight(
     fill_alpha: float = BLOB_FILL_ALPHA_MASK,
 ) -> np.ndarray:
     """
-    Apply a semi-transparent fill + thin yellow border over the blob.
+    Apply a cyan semi-transparent fill + thick magenta border over the blob.
 
     rgb_img:    uint8 HxWx3
     blob_mask:  bool  HxW
     fill_alpha: 0.0 = no fill (border only), >0 = tinted fill
 
-    For RGB images pass fill_alpha=BLOB_FILL_ALPHA_RGB (0.0) so the
-    original image stays fully readable. For mask panels pass
-    fill_alpha=BLOB_FILL_ALPHA_MASK for a light tint.
+    Border and fill use distinct colors (magenta / cyan), so at least one stays
+    visible over any class color. For RGB images pass fill_alpha=0.0 so the
+    original image stays fully readable; for mask panels pass
+    fill_alpha=BLOB_FILL_ALPHA_MASK for a light cyan tint.
     """
     result = rgb_img.astype(np.float32)
-    color  = BLOB_HIGHLIGHT_COLOR
 
-    # Semi-transparent fill (skipped when fill_alpha == 0)
+    # Semi-transparent cyan fill (skipped when fill_alpha == 0)
     if fill_alpha > 0.0:
-        for c, cv in enumerate(color):
+        for c, cv in enumerate(BLOB_FILL_COLOR):
             result[:, :, c] = np.where(
                 blob_mask,
                 result[:, :, c] * (1.0 - fill_alpha) + cv * fill_alpha,
                 result[:, :, c],
             )
 
-    # Thin border: dilate by BLOB_BORDER_ITERS pixels, subtract original blob
+    # Thick magenta border: dilate by BLOB_BORDER_ITERS pixels, subtract blob
     border = binary_dilation(blob_mask, iterations=BLOB_BORDER_ITERS) & ~blob_mask
-    for c, cv in enumerate(color):
+    for c, cv in enumerate(BLOB_BORDER_COLOR):
         result[:, :, c] = np.where(border, float(cv), result[:, :, c])
 
     return result.clip(0, 255).astype(np.uint8)
@@ -221,7 +225,7 @@ def save_overlays(
         "blob_mask_npy": os.path.join(out_dir, f"{prefix}_blobmask.npy"),
     }
 
-    # RGB: no fill, only a thin yellow border so the image stays fully readable
+    # RGB: no fill, only a thick magenta border so the image stays fully readable
     Image.fromarray(
         apply_blob_highlight(rgb_full, blob_mask, fill_alpha=BLOB_FILL_ALPHA_RGB)
     ).save(paths["overlay_rgb"])
@@ -384,6 +388,13 @@ def parse_args():
                    help=f"Grow confidence threshold (default: {Config.GROW_THRESHOLD})")
     p.add_argument("--min-blob",   type=int,   default=Config.MIN_BLOB_SIZE_PX,
                    help=f"Minimum blob size in pixels (default: {Config.MIN_BLOB_SIZE_PX})")
+    p.add_argument("--mask-dir",   default=Config.TEST_MASK_PATH,
+                   help="Mask directory (default: current test masks). Point to the "
+                        "original pre-review masks for a before-review demo queue.")
+    p.add_argument("--out-dir",    default=None,
+                   help="Output directory for the queue + overlays (default: data/.../label_review).")
+    p.add_argument("--limit",      type=int,   default=None,
+                   help="Process only N evenly-spaced snippets instead of all (quick demo).")
     return p.parse_args()
 
 
@@ -393,6 +404,11 @@ def main():
     Config.CONFIDENCE_THRESHOLD  = args.threshold
     Config.GROW_THRESHOLD        = args.grow
     Config.MIN_BLOB_SIZE_PX      = args.min_blob
+    Config.TEST_MASK_PATH        = args.mask_dir
+    if args.out_dir:
+        Config.OUTPUT_DIR   = args.out_dir
+        Config.QUEUE_FILE   = os.path.join(args.out_dir, "review_queue.json")
+        Config.OVERLAYS_DIR = os.path.join(args.out_dir, "overlays")
 
     print("=" * 70)
     print("GENERATE REVIEW QUEUE")
@@ -445,8 +461,16 @@ def main():
     if len(img_files) != len(mask_files):
         raise ValueError(f"Image/mask mismatch: {len(img_files)} vs {len(mask_files)}")
 
+    if args.limit and args.limit < len(img_files):
+        sel = np.linspace(0, len(img_files) - 1, args.limit, dtype=int)
+        img_files  = [img_files[i] for i in sel]
+        mask_files = [mask_files[i] for i in sel]
+        print(f"\nDemo mode: limited to {len(img_files)} evenly-spaced snippets.")
+
     n_snippets = len(img_files)
     print(f"\n{n_snippets} Test-Snippets gefunden.")
+    print(f"Masks from:     {Config.TEST_MASK_PATH}")
+    print(f"Output to:      {Config.OUTPUT_DIR}")
 
     # ------------------------------------------------------------------
     # 4. Batch-Inferenz + Blob-Extraktion
