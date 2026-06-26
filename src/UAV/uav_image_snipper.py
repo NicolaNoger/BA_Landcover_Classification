@@ -32,9 +32,15 @@ Pipeline design:
   integers, nDSM as uint16 centimetres, packed together into one uint16 array per
   tile. Storing raw avoids doubling disk usage; normalization is deferred to the
   DataLoader at training time.
-- The mosaic is a single contiguous area, so train/test is a *spatial* hold-out:
-  the rightmost TEST_FRACTION (by easting) is the test region, with a one-tile gap
-  so overlapping tiles never straddle the train/test boundary (no spatial leakage).
+- Train/test is a *block-checkerboard* hold-out. A simple left/right spatial split
+  fails here because the classes are spatially clustered (e.g. all greenhouses sit
+  in one area), so a contiguous test strip misses whole classes. Instead the mosaic
+  is partitioned into BLOCK_SIZE-px blocks, and ~TEST_FRACTION of the footprint
+  blocks are randomly (fixed seed) assigned to the test set, spread across the whole
+  scene. A tile is kept only if its entire window lies inside blocks of a single
+  split; tiles straddling a train/test block boundary are dropped. Because every
+  pixel belongs to exactly one block, this guarantees no train/test pixel overlap
+  despite the 50% tile overlap — representative classes in both splits, no leakage.
 - Tiles whose valid-pixel fraction is below MIN_VALID_FRACTION are dropped
   (the mosaic border is nodata).
 - If a label raster aligned to the mosaic grid is provided via MASK_PATH, it is
@@ -59,17 +65,54 @@ def compute_windows(width, height, snip_size, stride):
     return windows
 
 
-def assign_split(col_off, snip_size, split_x):
+def assign_test_blocks(rgb_src, height, width, block_size, test_fraction, seed, decim=16):
     """
-    Spatial hold-out by easting. Returns 'train', 'test' or None (gap/buffer).
+    Build the block-checkerboard test mask.
 
-    Tiles fully left of split_x -> train, fully right -> test. Tiles that cross
-    split_x are dropped so train and test never share pixels.
+    The mosaic is partitioned into a grid of block_size-px blocks. A block is a
+    candidate if it contains any footprint pixel (alpha > 0), tested on a decimated
+    read of the alpha band so the whole mosaic need not be held in memory. About
+    test_fraction of the candidate blocks are randomly (fixed seed) assigned to the
+    test set, spread across the scene.
+
+    Returns is_test, a (n_block_rows, n_block_cols) boolean array, True for test.
     """
-    if col_off + snip_size <= split_x:
-        return "train"
-    if col_off >= split_x:
+    nbr = (height + block_size - 1) // block_size
+    nbc = (width + block_size - 1) // block_size
+
+    alpha_small = rgb_src.read(4, out_shape=(height // decim, width // decim))
+    step = block_size // decim
+    valid_block = np.zeros((nbr, nbc), dtype=bool)
+    for bi in range(nbr):
+        for bj in range(nbc):
+            tile = alpha_small[bi * step:(bi + 1) * step, bj * step:(bj + 1) * step]
+            valid_block[bi, bj] = tile.size > 0 and (tile > 0).any()
+
+    idx = np.argwhere(valid_block)
+    rng = np.random.default_rng(seed)
+    n_test = int(round(len(idx) * test_fraction))
+
+    is_test = np.zeros((nbr, nbc), dtype=bool)
+    for k in rng.permutation(len(idx))[:n_test]:
+        is_test[tuple(idx[k])] = True
+    return is_test
+
+
+def assign_split(col_off, row_off, snip_size, block_size, is_test):
+    """
+    Block-checkerboard hold-out. Returns 'train', 'test' or None (boundary buffer).
+
+    A tile is 'test' only if every block its window overlaps is a test block, and
+    'train' only if none is. Tiles straddling a train/test block boundary return
+    None and are dropped, so train and test never share pixels.
+    """
+    bi0, bi1 = row_off // block_size, (row_off + snip_size - 1) // block_size
+    bj0, bj1 = col_off // block_size, (col_off + snip_size - 1) // block_size
+    sub = is_test[bi0:bi1 + 1, bj0:bj1 + 1]
+    if sub.all():
         return "test"
+    if not sub.any():
+        return "train"
     return None
 
 
@@ -221,8 +264,10 @@ if __name__ == "__main__":
 
     SNIP_SIZE = 1024
     STRIDE = 512
-    TEST_FRACTION = 0.20          # rightmost share (by easting) held out as test
+    TEST_FRACTION = 0.20          # share of footprint blocks held out as test
     MIN_VALID_FRACTION = 0.50     # drop tiles with too much nodata border
+    BLOCK_SIZE = 2048             # block-checkerboard cell size (px)
+    SPLIT_SEED = 3                # fixed seed; chosen for balanced class coverage
 
     write_masks = os.path.isfile(mask_path)
 
@@ -253,11 +298,15 @@ if __name__ == "__main__":
     base_transform = rgb_src.transform
     dsm_nodata = dsm_src.nodata
     width, height = rgb_src.width, rgb_src.height
-    split_x = int(width * (1.0 - TEST_FRACTION))
+
+    is_test = assign_test_blocks(
+        rgb_src, height, width, BLOCK_SIZE, TEST_FRACTION, SPLIT_SEED
+    )
 
     windows = compute_windows(width, height, SNIP_SIZE, STRIDE)
     print(f"\nMosaic: {width} x {height} px | candidate tiles: {len(windows)}")
-    print(f"Tile: {SNIP_SIZE}px stride {STRIDE} | test = easting beyond x={split_x}px")
+    print(f"Tile: {SNIP_SIZE}px stride {STRIDE} | block-checkerboard split "
+          f"(block={BLOCK_SIZE}px, seed={SPLIT_SEED}, {is_test.sum()} test blocks)")
     print(f"Masks: {'ON (' + mask_path + ')' if write_masks else 'OFF (no label raster yet)'}")
 
     # Train-only running stats (valid pixels only).
@@ -271,7 +320,7 @@ if __name__ == "__main__":
 
     print("\nProcessing tiles...")
     for i, (col_off, row_off) in enumerate(windows):
-        split = assign_split(col_off, SNIP_SIZE, split_x)
+        split = assign_split(col_off, row_off, SNIP_SIZE, BLOCK_SIZE, is_test)
         if split is None:
             skipped_gap += 1
             continue
@@ -331,7 +380,10 @@ if __name__ == "__main__":
         "channels": list(CHANNELS),
         "snip_size": SNIP_SIZE,
         "stride": STRIDE,
+        "split": "block_checkerboard",
         "test_fraction": TEST_FRACTION,
+        "block_size": BLOCK_SIZE,
+        "split_seed": SPLIT_SEED,
         "min_valid_fraction": MIN_VALID_FRACTION,
         "ndsm_max_m": NDSM_MAX_M,
         "ndsm_unit": "centimetres",
@@ -345,7 +397,7 @@ if __name__ == "__main__":
     print("\nDone.")
     print(f"  Train tiles: {counts['train']} -> {train_img_out}")
     print(f"  Test tiles:  {counts['test']} -> {test_img_out}")
-    print(f"  Skipped (nodata border): {skipped_nodata} | (train/test gap): {skipped_gap}")
+    print(f"  Skipped (nodata border): {skipped_nodata} | (block boundary buffer): {skipped_gap}")
     print(f"  Channels: {CHANNELS}")
     print(f"  Stats: {stats_path}")
     print(f"  mean={np.array2string(mean, precision=2)}")

@@ -69,7 +69,18 @@ class Config:
     LEARNING_RATE = 1e-4
 
     FOCAL_GAMMA = 2.0
-    FOCAL_ALPHA = [1.0] * NUM_CLASSES  # per-class focal loss weights
+    # Per-class focal loss weights from softened inverse class frequency:
+    # alpha_c = sqrt(1 / freq_c), normalized to mean 1, with freq_c measured on the
+    # training region only. The sqrt softening raises the floor on the dominant
+    # classes (Trees, Acre) so focal gamma does not suppress them twice, while still
+    # up-weighting rare classes (Car, Hedge). Same rationale as the aerial stage,
+    # which hand-tuned weights toward the rarer classes; adjust here if a class
+    # under-performs after the first run (see pixel_distribution.csv).
+    FOCAL_ALPHA = [
+        0.53, 0.95, 0.72, 2.51,   # Building, Greenhouse, Street, Car
+        0.87, 0.39, 1.84, 1.40,   # Pavement, Trees, Hedge, Bush
+        0.82, 1.02, 0.44, 0.50,   # Garden, Gravel, Acre, Mowed_Grass
+    ]
 
     # Set to a weights path (e.g. ".../best_model_ckpt") to continue
     # training from a previous run. Leave as None to train from scratch.
