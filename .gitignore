@@ -20,4 +20,3 @@ lightning_logs/
 /testing/
 /.quarto/
 **/*.quarto_ipynb
-/BA_HPC/

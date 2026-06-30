@@ -127,7 +127,7 @@ def prepare_dataset(dataset, batch_size=8, num_classes=8, is_training=True):
     )
 
     if is_training:
-        dataset = dataset.cache()
+        # dataset = dataset.cache() # Disabled to prevent OOM (Out Of Memory) on HPC
         dataset = dataset.shuffle(1000)
         dataset = dataset.batch(batch_size)
         dataset = dataset.map(Augment(), num_parallel_calls=tf.data.AUTOTUNE)

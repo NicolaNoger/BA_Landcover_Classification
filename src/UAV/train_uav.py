@@ -39,7 +39,7 @@ from dataloader import load_npy_dataset, prepare_dataset
 
 class Config:
     PROJECT_ROOT = "/cfs/earth/scratch/nogernic/BA_2026"
-    DATA_PATH = os.path.join(PROJECT_ROOT, "data", "uav_training_data")
+    DATA_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "uav_training_data")
 
     TRAIN_IMG_PATH = os.path.join(DATA_PATH, "train", "img_snippets")
     TRAIN_MASK_PATH = os.path.join(DATA_PATH, "train", "mask_snippets")
@@ -58,7 +58,7 @@ class Config:
     # Cascade ablation switch. True: feed the coarse-context channels (4 continuous
     # + 8 one-hot = 12 ch). False: RGB + nDSM only (4 ch), no coarse support.
     # Both variants read the same on-disk tiles, so the comparison is controlled.
-    USE_COARSE = True
+    USE_COARSE = False
 
     # UAV stage: 1024x1024 tiles. Channel count follows USE_COARSE.
     INPUT_SHAPE = (1024, 1024, 12 if USE_COARSE else 4)
@@ -238,7 +238,10 @@ def load_data():
     )
 
     n_total = train_pool.cardinality().numpy()
-    train_pool = train_pool.shuffle(1000, seed=42, reshuffle_each_iteration=False)
+    # Buffer kept small: each element is an assembled 12-channel 1024x1024 tile
+    # (~52 MB), so a full-size shuffle buffer would need tens of GB of host RAM
+    # and OOM-kill the job. 256 still gives a well-mixed, seed-fixed split.
+    train_pool = train_pool.shuffle(256, seed=42, reshuffle_each_iteration=False)
 
     n_train = int(n_total * Config.TRAIN_RATIO)
     train_set = train_pool.take(n_train)

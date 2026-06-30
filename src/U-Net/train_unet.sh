@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=unet_training
-#SBATCH --partition=earth-4
+#SBATCH --partition=earth-5
 #SBATCH --constraint=rhel8
 #SBATCH --time=02-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --gpus=1
 
 # Print job info
 echo "=========================================="
@@ -24,8 +24,8 @@ module load gcc/9.4.0-pe5.34
 module load cuda/11.6.2
 module load lsfm-init-miniconda/1.0.0   
 
-cd /cfs/earth/scratch/nogernic/PA2/src/U-net
-conda activate unet_gpu        
+cd /cfs/earth/scratch/nogernic/BA_2026/src/Unet
+conda activate ba2026_unet
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH" #without this it does not work, does not find libcudart.so so also no GPU
 
 dos2unix train_unet.py

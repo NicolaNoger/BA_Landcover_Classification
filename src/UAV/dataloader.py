@@ -126,7 +126,7 @@ def prepare_dataset(dataset, batch_size, num_classes, is_training):
     )
 
     if is_training:
-        dataset = dataset.shuffle(500)  # smaller buffer: 1024x1024x12 tiles are large
+        dataset = dataset.shuffle(64)  # small buffer: 1024x1024x12 one-hot tiles are ~96 MB each
         dataset = dataset.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
         dataset = dataset.batch(batch_size)
         dataset = dataset.repeat()
