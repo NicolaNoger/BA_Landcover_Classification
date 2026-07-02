@@ -21,3 +21,4 @@ lightning_logs/
 /.quarto/
 **/*.quarto_ipynb
 **/reports/
+/.luarc.json

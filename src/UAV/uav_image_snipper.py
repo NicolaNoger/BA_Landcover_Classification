@@ -13,39 +13,6 @@ UAV Image Snipper: build the high-resolution UAV training stack and cut it into 
 This is the UAV-stage analogue of src/U-Net/image_snipper.py. It mirrors that
 pipeline (raw tiles on disk, normalization deferred to the DataLoader, train-only
 mean/std) but adds the UAV-specific preprocessing for the cascade:
-
-Pipeline design:
-- Inputs are a single co-registered UAV survey:
-    * RGB orthomosaic (4 bands: R, G, B, Alpha)  ~0.015 m GSD, EPSG:2056
-    * DSM (absolute surface elevation, float32)   same grid as the RGB
-- The DSM is an *absolute* surface model (~520 m), not a height above ground.
-  It is converted to an nDSM by subtracting the SwissALTI3D DTM, which is
-  resampled (bilinear) onto the UAV grid per tile.
-- Coarse semantic context: the trained primary-stage DeepLabV3+ classifies the
-  overlapping orthophoto tiles (predict_coarse_tiles.py -> coarse_class_tile{24,25}.tif).
-  Those argmax class maps (0.1 m) are merged and resampled (nearest, since class
-  IDs must not be interpolated) onto the UAV grid as one extra channel.
-- Final channel stack: [R, G, B, nDSM, Coarse_Class]  (5 channels). NIR / LiDAR
-  intensity are not available at UAV scale; the coarse class supplies the
-  semantic context of the cascade.
-- Tiles are 1024x1024 with stride 512. RGB / coarse-class are stored as small
-  integers, nDSM as uint16 centimetres, packed together into one uint16 array per
-  tile. Storing raw avoids doubling disk usage; normalization is deferred to the
-  DataLoader at training time.
-- Train/test is a *block-checkerboard* hold-out. A simple left/right spatial split
-  fails here because the classes are spatially clustered (e.g. all greenhouses sit
-  in one area), so a contiguous test strip misses whole classes. Instead the mosaic
-  is partitioned into BLOCK_SIZE-px blocks, and ~TEST_FRACTION of the footprint
-  blocks are randomly (fixed seed) assigned to the test set, spread across the whole
-  scene. A tile is kept only if its entire window lies inside blocks of a single
-  split; tiles straddling a train/test block boundary are dropped. Because every
-  pixel belongs to exactly one block, this guarantees no train/test pixel overlap
-  despite the 50% tile overlap — representative classes in both splits, no leakage.
-- Tiles whose valid-pixel fraction is below MIN_VALID_FRACTION are dropped
-  (the mosaic border is nodata).
-- If a label raster aligned to the mosaic grid is provided via MASK_PATH, it is
-  tiled in lock-step with the images (identical windows, identical train/test
-  split) and saved as uint8 mask snippets. Otherwise mask output is skipped.
 """
 
 

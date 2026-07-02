@@ -1,4 +1,4 @@
-name: unet_gpu
+name: ENV_HPC
 channels:
   - conda-forge
   - defaults
